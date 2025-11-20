@@ -2,7 +2,7 @@
 local tr = aegisub.gettext
 script_name = "说话人修改样式和清除颜色v2.1"
 script_description = "根据说话人批量修改字幕样式，并可选清除特定颜色标签"
-script_author = "Claude"
+script_author = "Claude3.5"
 script_version = "2.1"  -- 版本号更新
 
 -- 配置文件
@@ -287,3 +287,4 @@ end
 
 -- 注册宏
 aegisub.register_macro(script_name, script_description, actor_style_changer)
+
