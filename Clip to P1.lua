@@ -1,6 +1,6 @@
 script_name = "Clip to P1 Drawing"
 script_description = "将 \\clip 转换为 \\p1，先校验后弹窗"
-script_author = "Assistant"
+script_author = "Gemini 3 pro"
 script_version = "4.0"
 
 -- 辅助函数：四舍五入
@@ -159,5 +159,6 @@ function clip_to_p1_v4(subs, sel)
     
     aegisub.set_undo_point("Clip to P1 Conversion")
 end
+
 
 aegisub.register_macro(script_name, script_description, clip_to_p1_v4)
