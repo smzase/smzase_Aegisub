@@ -3,7 +3,7 @@
 
 script_name = "批量修改说话人"
 script_description = "批量修改选中行的说话人"
-script_author = "ChatGPT5 + Claude-Sonnet-4"
+script_author = "ChatGPT5 + Claude-Sonnet-4 + Deepseek v3"
 script_version = "2"
 
 -- 会话内全局变量
@@ -224,3 +224,4 @@ function change_actor_singlecolumn(subs, sel)
 end
 
 aegisub.register_macro(script_name, script_description, change_actor_singlecolumn)
+
