@@ -4,7 +4,7 @@
 
 script_name = "Gradient Color"
 script_description = "Apply gradient colors to text"
-script_author = "Claude"
+script_author = "Claude3.7"
 script_version = "1.0"
 
 -- Function to convert RGB to ASS color format (&HBBGGRR&)
@@ -249,3 +249,4 @@ end
 
 -- Register the macro
 aegisub.register_macro(script_name, script_description, apply_gradient)
+
