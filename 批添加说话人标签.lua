@@ -1,7 +1,7 @@
 -- 脚本信息
 script_name = "批量添加说话人标签"
 script_description = "对选中行弹出窗口，为不同的说话人批量添加ASS标签（如颜色代码）"
-script_author = "Assistant"
+script_author = "gemini 3 pro"
 script_version = "1.0"
 
 function add_speaker_tags(subtitles, selected_lines, active_line)
@@ -93,4 +93,5 @@ function add_speaker_tags(subtitles, selected_lines, active_line)
 end
 
 -- 注册宏
+
 aegisub.register_macro(script_name, script_description, add_speaker_tags)
