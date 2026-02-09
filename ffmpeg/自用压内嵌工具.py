@@ -1,9 +1,3 @@
-"""
-三明治摆烂组 - 自动化压制工具
-支持 CRF 单次压制和 2-Pass 双通道压制
-Updated: Added Window Geometry Saving/Restoring
-"""
-
 import sys
 import os
 import json
