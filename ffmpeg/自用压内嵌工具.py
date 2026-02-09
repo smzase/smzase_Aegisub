@@ -6,6 +6,8 @@ import re
 import time
 import glob
 import copy
+import ctypes
+from ctypes import windll, byref, c_int, sizeof
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
@@ -296,12 +298,15 @@ class SettingsDialog(QDialog):
         self.input_folder_name.setEnabled(self.chk_use_folder.isChecked())
 
     def get_current_settings_dict(self) -> Dict:
-        return {
+        # 保留原有的 theme_mode 和 window_geometry
+        settings = copy.deepcopy(self.raw_settings)
+        settings.update({
             "base_path": self.input_base_path.text(),
             "use_sub_folder": self.chk_use_folder.isChecked(),
             "folder_name": self.input_folder_name.text(),
             "default_params_matrix": self.param_matrix
-        }
+        })
+        return settings
 
     def _on_apply(self):
         new_settings = self.get_current_settings_dict()
@@ -482,13 +487,43 @@ class EncodeManager(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("三明治摆烂组 - 自动化压制工具 (支持 2-Pass)")
+        self.setWindowTitle("smzase 自用压制工具")
         
-        # 数据初始化
-        self.app_settings_file = "app_settings.json"
+        # 1. 初始化基础路径逻辑
+        # 默认使用 Documents/ffmpeg smzase 作为配置目录
+        default_docs = os.path.join(os.path.expanduser("~"), "Documents")
+        default_folder = "ffmpeg smzase"
+        self.default_config_base = os.path.join(default_docs, default_folder)
+        
+        # 尝试创建默认目录（如果不存在）
+        if not os.path.exists(self.default_config_base):
+            try:
+                os.makedirs(self.default_config_base, exist_ok=True)
+            except:
+                self.default_config_base = os.getcwd() # 回退到当前目录
+
+        # 2. 预设设置文件路径 (默认在 default_config_base 下)
+        self.app_settings_file = os.path.join(self.default_config_base, "app_settings.json")
+        
+        # 3. 加载设置
+        # 注意：如果加载的设置中定义了 custom base_path，_get_config_dir 会改变
         self.app_settings = self._load_app_settings()
         
-        # [新增] 恢复窗口大小和位置
+        # 4. 确定最终的 config_dir
+        # _get_config_dir 会基于加载后的 settings 判断路径
+        self.config_dir = self._get_config_dir()
+        self.profile_file = os.path.join(self.config_dir, "profiles.json")
+        
+        # 5. 修正 app_settings_file 的位置
+        # 确保 app_settings.json 和 profiles.json 在同一个目录下
+        # 这样下次启动时，如果 config_dir 变了，我们需要在 default_config_base 下保留一个指针
+        # 或者简化为：必须把 settings 文件放在实际的 config_dir 下
+        self.app_settings_file = os.path.join(self.config_dir, "app_settings.json")
+        
+        # 保存一次设置，确保文件存在于目标目录
+        self._save_app_settings()
+        
+        # 6. 恢复窗口状态和主题
         self._restore_window_geometry()
         
         self.profiles: Dict = {}
@@ -496,15 +531,14 @@ class EncodeManager(QMainWindow):
         self.completed_history: set = set()
         self.force_stop_flag = False
         
-        self.config_dir = self._get_config_dir()
-        self.profile_file = os.path.join(self.config_dir, "profiles.json")
-        
         self.worker: Optional[Worker] = None
         self.is_running = False
         self.current_item: Optional[QListWidgetItem] = None
         
-        self.is_dark = False
-        self._apply_theme(False)
+        # 从设置中加载主题配置
+        theme_mode = self.app_settings.get("theme_mode", "light")
+        self.is_dark = (theme_mode == "dark")
+        self._apply_theme(self.is_dark)
         
         self._init_ui()
         self._load_profiles()
@@ -535,20 +569,44 @@ class EncodeManager(QMainWindow):
         return target
 
     def _load_app_settings(self) -> Dict:
-        if os.path.exists(self.app_settings_file):
-            try:
-                with open(self.app_settings_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except: pass
+        # 优先尝试从 self.app_settings_file 加载（该路径在 __init__ 中被初始化为默认文档路径）
+        # 如果当前目录下也有，作为备用或迁移逻辑
+        
+        paths_to_try = [
+            self.app_settings_file,
+            "app_settings.json" # CWD fallback
+        ]
+
+        loaded_settings = {}
+        file_found = False
+
+        for path in paths_to_try:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        loaded_settings = json.load(f)
+                        file_found = True
+                        break
+                except: pass
         
         default_docs = os.path.join(os.path.expanduser("~"), "Documents")
-        return {
+        
+        # 默认配置
+        default_settings = {
             "base_path": default_docs,
             "use_sub_folder": True,
             "folder_name": "ffmpeg smzase",
             "default_params_matrix": DEFAULT_PARAMS_TEMPLATE,
-            "window_geometry": None # 新增字段占位
+            "window_geometry": None,
+            "theme_mode": "light" # 默认浅色
         }
+        
+        # 合并配置（保留默认值中存在但文件中没有的键）
+        if file_found:
+            for k, v in loaded_settings.items():
+                default_settings[k] = v
+                
+        return default_settings
 
     def update_settings(self, new_settings: Dict):
         path_changed = (
@@ -556,21 +614,40 @@ class EncodeManager(QMainWindow):
             new_settings["use_sub_folder"] != self.app_settings.get("use_sub_folder") or
             new_settings["folder_name"] != self.app_settings.get("folder_name")
         )
-        # 保持 geometry 不被覆盖（如果设置页未传递它）
+        
+        # 保持 geometry 和 theme_mode 不被设置页覆盖
         if "window_geometry" not in new_settings:
             new_settings["window_geometry"] = self.app_settings.get("window_geometry")
+        if "theme_mode" not in new_settings:
+            new_settings["theme_mode"] = self.app_settings.get("theme_mode", "light")
             
         self.app_settings = new_settings
+        
+        # 如果路径改变，需要重新计算 config_dir 并移动 settings 文件指针
+        if path_changed:
+            self.config_dir = self._get_config_dir()
+            self.app_settings_file = os.path.join(self.config_dir, "app_settings.json")
+            self.profile_file = os.path.join(self.config_dir, "profiles.json")
+            
         self._save_app_settings()
         if path_changed:
-             QMessageBox.information(self, "路径变更", "路径设置已修改，请重启软件以加载新路径下的配置。")
+             QMessageBox.information(self, "路径变更", "路径设置已修改，配置文件将保存至新路径。\n注意：旧路径下的文件不会自动移动，请手动迁移 Profiles。")
 
     def _save_app_settings(self):
         try:
+            # 确保目录存在
+            parent_dir = os.path.dirname(self.app_settings_file)
+            if not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
+                
             with open(self.app_settings_file, 'w', encoding='utf-8') as f:
                 json.dump(self.app_settings, f, ensure_ascii=False, indent=4)
         except Exception as e:
-            InfoBar.error(title="错误", content=f"保存设置失败: {e}", parent=self)
+            # 在 UI 初始化前可能调用，需做保护
+            try:
+                InfoBar.error(title="错误", content=f"保存设置失败: {e}", parent=self)
+            except:
+                print(f"Error saving settings: {e}")
 
     # ==================== UI 初始化 ====================
     def _init_ui(self):
@@ -852,34 +929,53 @@ class EncodeManager(QMainWindow):
     # ==================== 逻辑功能实现 ====================
     def _toggle_theme(self):
         self.is_dark = not self.is_dark
+        # 保存主题设置
+        self.app_settings["theme_mode"] = "dark" if self.is_dark else "light"
+        self._save_app_settings()
+        # 应用
         self._apply_theme(self.is_dark)
         
     def _apply_theme(self, is_dark: bool):
-        if is_dark:
-            setTheme(Theme.DARK)
-            setThemeColor("#FF9900")
-            self.setStyleSheet("""
-                QMainWindow { background-color: #303030; }
-                QListWidget { background-color: #383838; border: 1px solid #454545; color: white; }
-                QListWidget::item:selected { background-color: #454545; }
-                QTextEdit, QPlainTextEdit, LineEdit, PlainLineEdit { 
-                    background-color: #383838; color: white; border: 1px solid #454545; border-radius: 4px;
-                }
-                QSplitter::handle { background-color: #505050; height: 2px; width: 2px; }
-                SubtitleLabel#MetricValue { color: #FF9900; }
-            """)
-            if hasattr(self, 'lbl_pass1'): self.lbl_pass1.setStyleSheet("color: #FF9900; font-weight: bold;")
-            if hasattr(self, 'lbl_pass2'): self.lbl_pass2.setStyleSheet("color: #FF9900; font-weight: bold;")
-        else:
-            setTheme(Theme.LIGHT)
-            setThemeColor("#009FAA")
-            self.setStyleSheet("""
-                QMainWindow { background-color: #f3f3f3; }
-                QSplitter::handle { background-color: #d0d0d0; }
-                SubtitleLabel#MetricValue { color: #0078D7; }
-            """)
-            if hasattr(self, 'lbl_pass1'): self.lbl_pass1.setStyleSheet("color: #0078D7; font-weight: bold;")
-            if hasattr(self, 'lbl_pass2'): self.lbl_pass2.setStyleSheet("color: #0078D7; font-weight: bold;")
+            # === 原有逻辑：设置 QFluentWidgets 主题和内部样式 ===
+            if is_dark:
+                setTheme(Theme.DARK)
+                setThemeColor("#FF9900")
+                self.setStyleSheet("""
+                    QMainWindow { background-color: #303030; }
+                    QListWidget { background-color: #383838; border: 1px solid #454545; color: white; }
+                    QListWidget::item:selected { background-color: #454545; }
+                    QTextEdit, QPlainTextEdit, LineEdit, PlainLineEdit { 
+                        background-color: #383838; color: white; border: 1px solid #454545; border-radius: 4px;
+                    }
+                    QSplitter::handle { background-color: #505050; height: 2px; width: 2px; }
+                    SubtitleLabel#MetricValue { color: #FF9900; }
+                """)
+                if hasattr(self, 'lbl_pass1'): self.lbl_pass1.setStyleSheet("color: #FF9900; font-weight: bold;")
+                if hasattr(self, 'lbl_pass2'): self.lbl_pass2.setStyleSheet("color: #FF9900; font-weight: bold;")
+            else:
+                setTheme(Theme.LIGHT)
+                setThemeColor("#009FAA")
+                self.setStyleSheet("""
+                    QMainWindow { background-color: #f3f3f3; }
+                    QSplitter::handle { background-color: #d0d0d0; }
+                    SubtitleLabel#MetricValue { color: #0078D7; }
+                """)
+                if hasattr(self, 'lbl_pass1'): self.lbl_pass1.setStyleSheet("color: #0078D7; font-weight: bold;")
+                if hasattr(self, 'lbl_pass2'): self.lbl_pass2.setStyleSheet("color: #0078D7; font-weight: bold;")
+
+            # === 新增逻辑：强制刷新 Windows 标题栏颜色 ===
+            if sys.platform == "win32":
+                try:
+                    # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (适用于 Win10 20H1+ 和 Win11)
+                    hwnd = int(self.winId())
+                    value = c_int(1 if is_dark else 0)
+                    windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, 20, byref(value), sizeof(value)
+                    )
+                    # 强制触发重绘以立即更新标题栏
+                    self.repaint()
+                except Exception:
+                    pass
 
     def _open_settings_dialog(self):
         dialog = SettingsDialog(self, self.app_settings, self.is_dark)
