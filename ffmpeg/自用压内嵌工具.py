@@ -11,13 +11,14 @@ from ctypes import windll, byref, c_int, sizeof
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRect
-from PyQt6.QtGui import QColor, QAction, QPalette
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRect, QSize
+from PyQt6.QtGui import QColor, QAction, QPalette, QPainter, QBrush, QLinearGradient, QPainterPath
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QFileDialog, QFrame, QListWidgetItem, QAbstractItemView,
     QSplitter, QGridLayout, QMessageBox, QInputDialog, QDialog, 
-    QStackedWidget, QDialogButtonBox, QLabel, QButtonGroup
+    QStackedWidget, QDialogButtonBox, QLabel, QButtonGroup,
+    QSizePolicy, QListView
 )
 
 from qfluentwidgets import (
@@ -25,7 +26,7 @@ from qfluentwidgets import (
     CardWidget, StrongBodyLabel, CaptionLabel, InfoBar,
     setTheme, Theme, ListWidget, FluentIcon as FIF,
     Action, RoundMenu, CheckBox, ToolButton, setThemeColor,
-    SegmentedWidget, Pivot
+    SegmentedWidget, Pivot, ProgressBar
 )
 
 # ==================== 常量与全局配置 ====================
@@ -52,7 +53,7 @@ def get_default_param_matrix():
 # 默认参数模板
 DEFAULT_PARAMS_TEMPLATE = get_default_param_matrix()
 
-# ==================== 自定义控件 (修复粘贴格式问题) ====================
+# ==================== 自定义控件 ====================
 class PlainLineEdit(LineEdit):
     """重写粘贴行为，只接受纯文本"""
     def insertFromMimeData(self, source: QMimeData):
@@ -64,6 +65,89 @@ class PlainTextEdit(TextEdit):
     def insertFromMimeData(self, source: QMimeData):
         if source.hasText():
             self.insertPlainText(source.text())
+
+class TaskItemWidget(QWidget):
+    """自定义任务列表项 Widget"""
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.text = text
+        self.progress = 0.0
+        self.pass_type = 0 # 0: Normal/CRF, 1: Pass 1, 2: Pass 2
+        self.status_code = 0 # 0: Pending, 1: Running, 2: Done, 3: Error
+        
+        # 布局设置为0，确保 Widget 填满 Item 区域
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 使用普通的 QLabel 以获得更好的换行控制
+        self.lbl_title = QLabel(text)
+        self.lbl_title.setWordWrap(True)
+        # 给 Label 设置 Margin，确保文字不会贴在进度条背景的边缘
+        # 这里的值 (16, 12, 16, 12) 是为了让文字在 visually adjusted 的矩形内部
+        self.lbl_title.setContentsMargins(16, 12, 16, 12)
+        
+        # 继承父级字体样式并调整
+        font = self.lbl_title.font()
+        font.setBold(False)
+        font.setPointSize(10)
+        self.lbl_title.setFont(font)
+        self.lbl_title.setStyleSheet("background: transparent; border: none;")
+        
+        layout.addWidget(self.lbl_title)
+        
+    def set_status(self, progress: float = 0.0, pass_idx=0, status_code=0):
+        self.progress = max(0.0, min(1.0, progress))
+        self.pass_type = pass_idx
+        self.status_code = status_code
+        self.update() # 触发重绘
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 获取控件区域
+        full_rect = self.rect()
+        
+        # 【关键修改】调整绘制区域以匹配 Fluent UI 列表项选中态的背景大小
+        # 通常 Fluent List Item 有左右 4px，上下 2px 的边距
+        draw_rect = full_rect.adjusted(4, 2, -4, -2)
+        
+        # 定义圆角路径 (圆角半径通常为 4 或 6)
+        path = QPainterPath()
+        path.addRoundedRect(draw_rect.x(), draw_rect.y(), draw_rect.width(), draw_rect.height(), 6, 6)
+        
+        # 1. 绘制完成或失败的背景
+        if self.status_code == 2: # Done
+             painter.fillPath(path, QColor(0, 200, 0, 40)) # 绿色背景
+        elif self.status_code == 3: # Error
+             painter.fillPath(path, QColor(255, 0, 0, 40)) # 红色背景
+        
+        # 2. 绘制进度条 (作为动态背景)
+        elif self.status_code == 1 and self.progress > 0: # Running
+            # 进度条颜色区分
+            if self.pass_type == 1:
+                # Pass 1: 蓝色系
+                color_start = QColor(0, 120, 215, 90)
+                color_end = QColor(0, 120, 215, 40)
+            else:
+                # CRF / Pass 2: 绿色系
+                color_start = QColor(0, 180, 60, 90)
+                color_end = QColor(0, 180, 60, 40)
+            
+            # 计算进度宽度 (基于调整后的 draw_rect)
+            prog_width = int(draw_rect.width() * self.progress)
+            
+            # 创建裁剪区域，确保进度条不超出圆角矩形
+            painter.setClipPath(path)
+            
+            # 绘制渐变
+            prog_rect = QRect(draw_rect.x(), draw_rect.y(), prog_width, draw_rect.height())
+            gradient = QLinearGradient(draw_rect.x(), 0, draw_rect.x() + prog_width, 0)
+            gradient.setColorAt(0, color_start)
+            gradient.setColorAt(1, color_end)
+            painter.fillRect(prog_rect, QBrush(gradient))
+
+        super().paintEvent(event)
 
 # ==================== 辅助组件：参数编辑器 Widget ====================
 class ParamEditorPage(QWidget):
@@ -320,16 +404,16 @@ class SettingsDialog(QDialog):
 
 # ==================== 进度显示面板 ====================
 class ProgressDashboard(CardWidget):
-    """FFmpeg 进度显示面板"""
+    """FFmpeg 进度显示面板 - 紧凑型"""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(90)
+        self.setFixedHeight(70) 
         self.start_timestamp = 0
         self._init_ui()
 
     def _init_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 10, 20, 10)
+        layout.setContentsMargins(15, 8, 15, 8)
         
         self.lbl_elapsed = self._create_metric(layout, "已用时间", "00:00:00")
         layout.addStretch(1)
@@ -345,13 +429,14 @@ class ProgressDashboard(CardWidget):
         container = QFrame()
         v_layout = QVBoxLayout(container)
         v_layout.setContentsMargins(0, 0, 0, 0)
-        v_layout.setSpacing(2)
+        v_layout.setSpacing(0)
+        v_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         title_label = CaptionLabel(title)
         title_label.setTextColor(QColor(100, 100, 100), QColor(150, 150, 150))
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        value_label = SubtitleLabel(default_val)
+        value_label = StrongBodyLabel(default_val)
         value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         value_label.setObjectName("MetricValue")
         
@@ -388,7 +473,8 @@ class ProgressDashboard(CardWidget):
 # ==================== 后台工作线程 ====================
 class Worker(QThread):
     log_signal = pyqtSignal(str)
-    progress_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(str) # 原始输出
+    percent_signal = pyqtSignal(float, int) # 进度百分比, pass_index
     finished_signal = pyqtSignal(bool, str, str)
     
     def __init__(self, commands: List[str], work_dir: str, output_file: str, 
@@ -402,6 +488,7 @@ class Worker(QThread):
         self.is_killed = False
         self.last_update_time = 0
         self.start_time = 0
+        self.total_duration_sec = 0.0
 
     def run(self):
         self.start_time = time.time()
@@ -411,12 +498,18 @@ class Worker(QThread):
         
         for index, cmd in enumerate(self.commands):
             if self.is_killed: break
+            
+            step_num = 0
             if total_steps > 1:
+                step_num = index + 1 # 1 for Pass 1, 2 for Pass 2
                 step_name = 'Pass 1' if index == 0 else 'Pass 2'
                 self.log_signal.emit(f"🔄 正在执行 [Step {index + 1}/{total_steps}]: {step_name}")
+            else:
+                step_num = 2 # treat single pass as "final" pass for color purpose (Green)
+            
             self.log_signal.emit(f"Executing: {cmd}")
             
-            if not self._execute_command(cmd):
+            if not self._execute_command(cmd, step_num):
                 self._cleanup()
                 duration = self._get_duration_str()
                 self.finished_signal.emit(False, self.output_file, duration)
@@ -437,18 +530,30 @@ class Worker(QThread):
         elapsed = int(time.time() - self.start_time)
         return str(timedelta(seconds=elapsed))
 
-    def _execute_command(self, cmd: str) -> bool:
+    def _parse_duration(self, time_str):
+        """Parse HH:MM:SS.mm into seconds"""
+        try:
+            h, m, s = time_str.split(':')
+            return float(h) * 3600 + float(m) * 60 + float(s)
+        except:
+            return 0.0
+
+    def _execute_command(self, cmd: str, pass_index: int) -> bool:
         try:
             self.process = subprocess.Popen(
                 cmd, cwd=self.work_dir, shell=True,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 encoding='utf-8', errors='replace', text=True, bufsize=1
             )
+            
+            # 重置当前命令的时长解析
+            self.total_duration_sec = 0.0
+            
             while True:
                 if self.is_killed: break
                 line = self.process.stdout.readline()
                 if not line and self.process.poll() is not None: break
-                if line: self._process_output_line(line.strip())
+                if line: self._process_output_line(line.strip(), pass_index)
 
             return_code = self.process.poll()
             if self.is_killed: return False
@@ -459,11 +564,24 @@ class Worker(QThread):
             self.log_signal.emit(f"🔴 [系统异常] 无法启动进程: {str(e)}")
             return False
 
-    def _process_output_line(self, line: str):
+    def _process_output_line(self, line: str, pass_index: int):
+        # 尝试获取总时长
+        if "Duration:" in line and self.total_duration_sec == 0:
+            if match := re.search(r"Duration: (\d+:\d+:\d+\.\d+)", line):
+                self.total_duration_sec = self._parse_duration(match.group(1))
+
         if "frame=" in line and "time=" in line:
             current_time = time.time()
             if current_time - self.last_update_time > 0.5:
                 self.progress_signal.emit(line)
+                
+                # 计算百分比
+                if self.total_duration_sec > 0:
+                    if match := re.search(r'time=(\d+:\d+:\d+\.\d+)', line):
+                        current_sec = self._parse_duration(match.group(1))
+                        percent = current_sec / self.total_duration_sec
+                        self.percent_signal.emit(percent, pass_index)
+                
                 self.last_update_time = current_time
         elif any(keyword in line for keyword in ["Error", "error", "Input #", "Output #"]):
             self.log_signal.emit(line)
@@ -490,40 +608,22 @@ class EncodeManager(QMainWindow):
         self.setWindowTitle("smzase 自用压制工具")
         
         # 1. 初始化基础路径逻辑
-        # 默认使用 Documents/ffmpeg smzase 作为配置目录
         default_docs = os.path.join(os.path.expanduser("~"), "Documents")
         default_folder = "ffmpeg smzase"
         self.default_config_base = os.path.join(default_docs, default_folder)
         
-        # 尝试创建默认目录（如果不存在）
         if not os.path.exists(self.default_config_base):
             try:
                 os.makedirs(self.default_config_base, exist_ok=True)
             except:
-                self.default_config_base = os.getcwd() # 回退到当前目录
+                self.default_config_base = os.getcwd()
 
-        # 2. 预设设置文件路径 (默认在 default_config_base 下)
         self.app_settings_file = os.path.join(self.default_config_base, "app_settings.json")
-        
-        # 3. 加载设置
-        # 注意：如果加载的设置中定义了 custom base_path，_get_config_dir 会改变
         self.app_settings = self._load_app_settings()
-        
-        # 4. 确定最终的 config_dir
-        # _get_config_dir 会基于加载后的 settings 判断路径
         self.config_dir = self._get_config_dir()
         self.profile_file = os.path.join(self.config_dir, "profiles.json")
-        
-        # 5. 修正 app_settings_file 的位置
-        # 确保 app_settings.json 和 profiles.json 在同一个目录下
-        # 这样下次启动时，如果 config_dir 变了，我们需要在 default_config_base 下保留一个指针
-        # 或者简化为：必须把 settings 文件放在实际的 config_dir 下
         self.app_settings_file = os.path.join(self.config_dir, "app_settings.json")
-        
-        # 保存一次设置，确保文件存在于目标目录
         self._save_app_settings()
-        
-        # 6. 恢复窗口状态和主题
         self._restore_window_geometry()
         
         self.profiles: Dict = {}
@@ -535,12 +635,17 @@ class EncodeManager(QMainWindow):
         self.is_running = False
         self.current_item: Optional[QListWidgetItem] = None
         
+        # UI 组件引用
+        self.btn_confirm_stop = None
+
         # 从设置中加载主题配置
         theme_mode = self.app_settings.get("theme_mode", "light")
         self.is_dark = (theme_mode == "dark")
-        self._apply_theme(self.is_dark)
-        
         self._init_ui()
+        
+        # 【修改点2】确保所有UI创建完毕后再应用主题，这样确认按钮才能获得初始样式
+        self._apply_theme(self.is_dark) 
+        
         self._load_profiles()
 
     def _restore_window_geometry(self):
@@ -569,9 +674,6 @@ class EncodeManager(QMainWindow):
         return target
 
     def _load_app_settings(self) -> Dict:
-        # 优先尝试从 self.app_settings_file 加载（该路径在 __init__ 中被初始化为默认文档路径）
-        # 如果当前目录下也有，作为备用或迁移逻辑
-        
         paths_to_try = [
             self.app_settings_file,
             "app_settings.json" # CWD fallback
@@ -591,17 +693,15 @@ class EncodeManager(QMainWindow):
         
         default_docs = os.path.join(os.path.expanduser("~"), "Documents")
         
-        # 默认配置
         default_settings = {
             "base_path": default_docs,
             "use_sub_folder": True,
             "folder_name": "ffmpeg smzase",
             "default_params_matrix": DEFAULT_PARAMS_TEMPLATE,
             "window_geometry": None,
-            "theme_mode": "light" # 默认浅色
+            "theme_mode": "light"
         }
         
-        # 合并配置（保留默认值中存在但文件中没有的键）
         if file_found:
             for k, v in loaded_settings.items():
                 default_settings[k] = v
@@ -615,7 +715,6 @@ class EncodeManager(QMainWindow):
             new_settings["folder_name"] != self.app_settings.get("folder_name")
         )
         
-        # 保持 geometry 和 theme_mode 不被设置页覆盖
         if "window_geometry" not in new_settings:
             new_settings["window_geometry"] = self.app_settings.get("window_geometry")
         if "theme_mode" not in new_settings:
@@ -623,7 +722,6 @@ class EncodeManager(QMainWindow):
             
         self.app_settings = new_settings
         
-        # 如果路径改变，需要重新计算 config_dir 并移动 settings 文件指针
         if path_changed:
             self.config_dir = self._get_config_dir()
             self.app_settings_file = os.path.join(self.config_dir, "app_settings.json")
@@ -635,15 +733,12 @@ class EncodeManager(QMainWindow):
 
     def _save_app_settings(self):
         try:
-            # 确保目录存在
             parent_dir = os.path.dirname(self.app_settings_file)
             if not os.path.exists(parent_dir):
                 os.makedirs(parent_dir, exist_ok=True)
-                
             with open(self.app_settings_file, 'w', encoding='utf-8') as f:
                 json.dump(self.app_settings, f, ensure_ascii=False, indent=4)
         except Exception as e:
-            # 在 UI 初始化前可能调用，需做保护
             try:
                 InfoBar.error(title="错误", content=f"保存设置失败: {e}", parent=self)
             except:
@@ -666,8 +761,6 @@ class EncodeManager(QMainWindow):
         panel.setFixedWidth(240)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(10, 10, 10, 10)
-        
-        layout.addWidget(SubtitleLabel("番剧配置列表"))
         
         add_btn = PushButton(FIF.ADD, "新建配置")
         add_btn.clicked.connect(self._add_profile_dialog)
@@ -710,7 +803,21 @@ class EncodeManager(QMainWindow):
         
         layout.addWidget(self._create_settings_card())
         layout.addWidget(self._create_control_card())
-        layout.addWidget(self._create_bottom_splitter(), 1)
+        
+        # 4. 替换 QSplitter 为 QHBoxLayout，按比例固定宽度
+        bottom_container = QWidget()
+        bottom_layout = QHBoxLayout(bottom_container)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(10)
+        
+        queue_panel = self._create_queue_panel()
+        log_panel = self._create_log_panel()
+        
+        # 设置拉伸因子 38 : 62
+        bottom_layout.addWidget(queue_panel, 38)
+        bottom_layout.addWidget(log_panel, 62)
+        
+        layout.addWidget(bottom_container, 1)
         return panel
 
     def _create_settings_card(self) -> CardWidget:
@@ -720,8 +827,11 @@ class EncodeManager(QMainWindow):
         layout.setVerticalSpacing(10)
         layout.setHorizontalSpacing(15)
         
-        self.entry_source_dir = self._add_folder_row(layout, 0, "视频源目录")
-        self.entry_sub_dir = self._add_folder_row(layout, 1, "字幕目录 (CD)")
+        # 5. 强制设置第一列（标签列）的最小宽度，防止界面抖动并对齐
+        layout.setColumnMinimumWidth(0, 90)
+        
+        self.entry_source_dir = self._add_folder_row(layout, 0, "源视频目录")
+        self.entry_sub_dir = self._add_folder_row(layout, 1, "字幕目录")
         self.entry_output_dir = self._add_folder_row(layout, 2, "输出目录")
         
         layout.addWidget(self._create_template_group(), 3, 0, 1, 3)
@@ -747,33 +857,43 @@ class EncodeManager(QMainWindow):
         group = QFrame()
         layout = QGridLayout(group)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setColumnMinimumWidth(0, 90) # 对齐内部网格的第一列
         
-        layout.addWidget(StrongBodyLabel("源文件模板:"), 0, 0)
+        # Row 0: Source Template (Wider)
+        layout.addWidget(StrongBodyLabel("源视频文件"), 0, 0)
         self.entry_source_template = PlainLineEdit()
         self.entry_source_template.setPlaceholderText("Title - S01E<ep>.mkv")
-        layout.addWidget(self.entry_source_template, 0, 1)
+        layout.addWidget(self.entry_source_template, 0, 1, 1, 3) # Span 3 cols
         
-        layout.addWidget(StrongBodyLabel("简中字幕模板:"), 1, 0)
+        # Row 1: SC
+        layout.addWidget(StrongBodyLabel("简体字幕"), 1, 0)
         self.entry_sub_sc = PlainLineEdit()
+        self.entry_sub_sc.setFixedWidth(140)
         layout.addWidget(self.entry_sub_sc, 1, 1)
         
-        layout.addWidget(StrongBodyLabel("繁中字幕模板:"), 1, 2)
-        self.entry_sub_tc = PlainLineEdit()
-        layout.addWidget(self.entry_sub_tc, 1, 3)
-        
-        layout.addWidget(StrongBodyLabel("简中输出模板:"), 2, 0)
+        lbl_out_sc = StrongBodyLabel("输出名称")
+        lbl_out_sc.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(lbl_out_sc, 1, 2)
         self.entry_out_sc = PlainLineEdit()
-        layout.addWidget(self.entry_out_sc, 2, 1)
+        layout.addWidget(self.entry_out_sc, 1, 3)
         
-        layout.addWidget(StrongBodyLabel("繁中输出模板:"), 2, 2)
+        # Row 2: TC
+        layout.addWidget(StrongBodyLabel("繁体字幕"), 2, 0)
+        self.entry_sub_tc = PlainLineEdit()
+        self.entry_sub_tc.setFixedWidth(140)
+        layout.addWidget(self.entry_sub_tc, 2, 1)
+        
+        lbl_out_tc = StrongBodyLabel("输出名称")
+        lbl_out_tc.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(lbl_out_tc, 2, 2)
         self.entry_out_tc = PlainLineEdit()
         layout.addWidget(self.entry_out_tc, 2, 3)
+        
         return group
 
     def _add_params_section(self, layout: QGridLayout):
         control_bar_layout = QHBoxLayout()
         
-        control_bar_layout.addWidget(CaptionLabel("硬件:"))
         self.seg_hardware = SegmentedWidget()
         for hw in HARDWARE_LIST:
             self.seg_hardware.addItem(routeKey=hw, text=hw)
@@ -783,7 +903,6 @@ class EncodeManager(QMainWindow):
         
         control_bar_layout.addSpacing(20)
         
-        control_bar_layout.addWidget(CaptionLabel("编码:"))
         self.seg_codec = SegmentedWidget()
         for codec in CODEC_LIST:
             self.seg_codec.addItem(routeKey=codec, text=codec)
@@ -831,7 +950,7 @@ class EncodeManager(QMainWindow):
         layout = QHBoxLayout(card)
         layout.setContentsMargins(20, 15, 20, 15)
         
-        layout.addWidget(SubtitleLabel("当前集数 <ep>:"))
+        layout.addWidget(SubtitleLabel("集数"))
         self.entry_ep = PlainLineEdit()
         self.entry_ep.setFixedWidth(80)
         self.entry_ep.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -869,14 +988,6 @@ class EncodeManager(QMainWindow):
         layout.addWidget(btn_add_both)
         return card
 
-    def _create_bottom_splitter(self) -> QSplitter:
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._create_queue_panel())
-        splitter.addWidget(self._create_log_panel())
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 6)
-        return splitter
-
     def _create_queue_panel(self) -> CardWidget:
         panel = CardWidget()
         layout = QVBoxLayout(panel)
@@ -894,6 +1005,11 @@ class EncodeManager(QMainWindow):
         self.queue_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.queue_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.queue_list.customContextMenuRequested.connect(self._show_queue_context_menu)
+        
+        # 允许 ItemWidget 自动调整大小以支持换行
+        self.queue_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.queue_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        
         layout.addWidget(self.queue_list)
         return panel
 
@@ -908,11 +1024,32 @@ class EncodeManager(QMainWindow):
         self.btn_start = PrimaryPushButton(FIF.PLAY, "开始压制")
         self.btn_start.clicked.connect(self._start_processing)
         header.addWidget(self.btn_start)
+        
+        # 3. 强制终止逻辑：初始按钮
         self.btn_stop = PushButton(FIF.CLOSE, "强制终止")
         self.btn_stop.setEnabled(False)
-        self.btn_stop.setStyleSheet("QPushButton { color: red; }")
-        self.btn_stop.clicked.connect(self._force_stop)
+        self.btn_stop.clicked.connect(self._show_stop_confirm)
         header.addWidget(self.btn_stop)
+        
+        # 3. 强制终止逻辑：确认容器 (默认隐藏)
+        self.stop_confirm_widget = QWidget()
+        stop_layout = QHBoxLayout(self.stop_confirm_widget)
+        stop_layout.setContentsMargins(0, 0, 0, 0)
+        stop_layout.setSpacing(5)
+        
+        # 保存为类成员，以便 Styling
+        self.btn_confirm_stop = PrimaryPushButton("确认")
+        # 样式表将在 _apply_theme 中设置，以确保 theme toggle 时正确
+        self.btn_confirm_stop.clicked.connect(self._force_stop)
+        
+        btn_cancel_stop = PushButton("取消")
+        btn_cancel_stop.clicked.connect(self._hide_stop_confirm)
+        
+        stop_layout.addWidget(self.btn_confirm_stop)
+        stop_layout.addWidget(btn_cancel_stop)
+        header.addWidget(self.stop_confirm_widget)
+        self.stop_confirm_widget.hide()
+        
         layout.addLayout(header)
         
         self.progress_dashboard = ProgressDashboard()
@@ -926,17 +1063,27 @@ class EncodeManager(QMainWindow):
         layout.addWidget(self.text_log)
         return panel
 
+    def _show_stop_confirm(self):
+        self.btn_stop.hide()
+        self.stop_confirm_widget.show()
+
+    def _hide_stop_confirm(self):
+        self.stop_confirm_widget.hide()
+        self.btn_stop.show()
+
     # ==================== 逻辑功能实现 ====================
     def _toggle_theme(self):
         self.is_dark = not self.is_dark
-        # 保存主题设置
         self.app_settings["theme_mode"] = "dark" if self.is_dark else "light"
         self._save_app_settings()
-        # 应用
         self._apply_theme(self.is_dark)
         
     def _apply_theme(self, is_dark: bool):
-            # === 原有逻辑：设置 QFluentWidgets 主题和内部样式 ===
+            # 强制修正确认按钮的样式，确保红底白字
+            stop_btn_style = "QPushButton { background-color: #d13438; border: 1px solid #d13438; color: white; border-radius: 4px; }"
+            if self.btn_confirm_stop:
+                self.btn_confirm_stop.setStyleSheet(stop_btn_style)
+
             if is_dark:
                 setTheme(Theme.DARK)
                 setThemeColor("#FF9900")
@@ -947,8 +1094,9 @@ class EncodeManager(QMainWindow):
                     QTextEdit, QPlainTextEdit, LineEdit, PlainLineEdit { 
                         background-color: #383838; color: white; border: 1px solid #454545; border-radius: 4px;
                     }
-                    QSplitter::handle { background-color: #505050; height: 2px; width: 2px; }
                     SubtitleLabel#MetricValue { color: #FF9900; }
+                    /* TaskItem Label color fix */
+                    QLabel { color: white; }
                 """)
                 if hasattr(self, 'lbl_pass1'): self.lbl_pass1.setStyleSheet("color: #FF9900; font-weight: bold;")
                 if hasattr(self, 'lbl_pass2'): self.lbl_pass2.setStyleSheet("color: #FF9900; font-weight: bold;")
@@ -957,22 +1105,18 @@ class EncodeManager(QMainWindow):
                 setThemeColor("#009FAA")
                 self.setStyleSheet("""
                     QMainWindow { background-color: #f3f3f3; }
-                    QSplitter::handle { background-color: #d0d0d0; }
                     SubtitleLabel#MetricValue { color: #0078D7; }
+                    /* TaskItem Label color fix */
+                    QLabel { color: black; }
                 """)
                 if hasattr(self, 'lbl_pass1'): self.lbl_pass1.setStyleSheet("color: #0078D7; font-weight: bold;")
                 if hasattr(self, 'lbl_pass2'): self.lbl_pass2.setStyleSheet("color: #0078D7; font-weight: bold;")
 
-            # === 新增逻辑：强制刷新 Windows 标题栏颜色 ===
             if sys.platform == "win32":
                 try:
-                    # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (适用于 Win10 20H1+ 和 Win11)
                     hwnd = int(self.winId())
                     value = c_int(1 if is_dark else 0)
-                    windll.dwmapi.DwmSetWindowAttribute(
-                        hwnd, 20, byref(value), sizeof(value)
-                    )
-                    # 强制触发重绘以立即更新标题栏
+                    windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(value), sizeof(value))
                     self.repaint()
                 except Exception:
                     pass
@@ -1254,9 +1398,17 @@ class EncodeManager(QMainWindow):
                 "id": f"{datetime.now().timestamp()}",
                 "desc": desc, "status": "pending", "raw_task": task
             }
-            list_item = QListWidgetItem(desc)
+            
+            # 使用自定义 Item Widget
+            list_item = QListWidgetItem()
             list_item.setData(Qt.ItemDataRole.UserRole, item_data)
             self.queue_list.addItem(list_item)
+            
+            item_widget = TaskItemWidget(desc)
+            # 初始高度，QListWidget ResizeMode Adjust 会处理后续高度
+            list_item.setSizeHint(item_widget.sizeHint())
+            self.queue_list.setItemWidget(list_item, item_widget)
+            
             if not task['suffix']:
                 key = (task['ep'], task['type'])
                 self.completed_history.discard(key)
@@ -1301,6 +1453,7 @@ class EncodeManager(QMainWindow):
         self.force_stop_flag = False
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
+        self._hide_stop_confirm()
         self.progress_dashboard.reset()
         self._process_next_task()
 
@@ -1321,7 +1474,12 @@ class EncodeManager(QMainWindow):
         data = target_item.data(Qt.ItemDataRole.UserRole)
         data['status'] = 'running'
         target_item.setData(Qt.ItemDataRole.UserRole, data)
-        target_item.setBackground(QColor(0, 120, 215, 50))
+        
+        # 更新 Widget 状态 (Running, status_code=1)
+        widget = self.queue_list.itemWidget(target_item)
+        if isinstance(widget, TaskItemWidget):
+            widget.set_status(progress=0.0, pass_idx=0, status_code=1)
+            
         self.queue_list.scrollToItem(target_item)
         self._run_ffmpeg(data['raw_task'])
 
@@ -1365,7 +1523,8 @@ class EncodeManager(QMainWindow):
         self.progress_dashboard.start_timer()
         self.worker = Worker(commands, profile['sub_dir'], full_out, temp_files)
         self.worker.log_signal.connect(self._log_to_ui)
-        self.worker.progress_signal.connect(self._update_progress)
+        self.worker.progress_signal.connect(self._update_progress_text)
+        self.worker.percent_signal.connect(self._update_progress_percent)
         self.worker.finished_signal.connect(self._task_finished_callback)
         self.worker.start()
 
@@ -1410,8 +1569,15 @@ class EncodeManager(QMainWindow):
         scrollbar = self.text_log.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def _update_progress(self, text: str):
+    def _update_progress_text(self, text: str):
         self.progress_dashboard.update_data(text)
+
+    def _update_progress_percent(self, percent: float, pass_idx: int):
+        if self.current_item:
+            widget = self.queue_list.itemWidget(self.current_item)
+            if isinstance(widget, TaskItemWidget):
+                # 更新进度条 (Running status_code=1)
+                widget.set_status(progress=percent, pass_idx=pass_idx, status_code=1)
 
     def _task_finished_callback(self, success: bool, output_file: str, duration: str):
         if self.force_stop_flag:
@@ -1420,17 +1586,24 @@ class EncodeManager(QMainWindow):
         if not self.current_item: return
         data = self.current_item.data(Qt.ItemDataRole.UserRole)
         task_info = data['raw_task']
+        
+        widget = self.queue_list.itemWidget(self.current_item)
+        
         if success:
             data['status'] = 'done'
-            self.current_item.setBackground(QColor(0, 255, 0, 30))
-            self.current_item.setText(f"✅ {data['desc']} [耗时: {duration}]")
+            if isinstance(widget, TaskItemWidget):
+                # Done status_code=2
+                widget.set_status(progress=1.0, status_code=2)
+            
             if not task_info.get('suffix'):
                 self.completed_history.add((task_info['ep'], task_info['type']))
                 self._check_auto_increment(task_info['ep'])
         else:
             data['status'] = 'error'
-            self.current_item.setBackground(QColor(255, 0, 0, 30))
-            self.current_item.setText(f"❌ {data['desc']} [失败]")
+            if isinstance(widget, TaskItemWidget):
+                # Error status_code=3
+                widget.set_status(progress=0.0, status_code=3)
+                
         self.current_item.setData(Qt.ItemDataRole.UserRole, data)
         self.current_item = None
         self.worker = None
@@ -1451,10 +1624,12 @@ class EncodeManager(QMainWindow):
         self.is_running = False
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self._hide_stop_confirm()
         self._log_to_ui("=== 队列完成 ===")
         InfoBar.success(title="完成", content="所有任务已结束", parent=self)
 
     def _force_stop(self):
+        self._hide_stop_confirm()
         if self.worker and self.is_running:
             self._log_to_ui("⚠️ 正在强制终止进程...")
             self.force_stop_flag = True
@@ -1472,8 +1647,9 @@ class EncodeManager(QMainWindow):
             try:
                 data = self.current_item.data(Qt.ItemDataRole.UserRole)
                 data['status'] = 'error'
-                self.current_item.setText(f"⏹ {data['desc']} (已终止)")
-                self.current_item.setBackground(QColor(255, 0, 0, 30))
+                widget = self.queue_list.itemWidget(self.current_item)
+                if isinstance(widget, TaskItemWidget):
+                    widget.set_status(progress=0.0, status_code=3) # Error color
             except: pass
         self.current_item = None
         self.btn_start.setEnabled(True)
