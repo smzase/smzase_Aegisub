@@ -11,8 +11,8 @@ from ctypes import windll, byref, c_int, sizeof
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRect, QSize
-from PyQt6.QtGui import QColor, QAction, QPalette, QPainter, QBrush, QLinearGradient, QPainterPath
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRect, QSize, QPoint
+from PyQt6.QtGui import QColor, QAction, QPalette, QPainter, QBrush, QLinearGradient, QPainterPath, QCursor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QFileDialog, QFrame, QListWidgetItem, QAbstractItemView,
@@ -36,7 +36,7 @@ APP_NAME = "ffmpeg_smzase"
 HARDWARE_LIST = ["CPU", "QSV", "NVENC", "VCN"]
 CODEC_LIST = ["X264", "X265", "X266", "AV1"]
 
-# 基础默认参数生成器 (默认为空)
+# 基础默认参数生成器
 def get_default_param_matrix():
     """生成 4x4 的默认参数矩阵，值为空"""
     matrix = {}
@@ -46,7 +46,8 @@ def get_default_param_matrix():
             matrix[hw][codec] = {
                 "crf": "",
                 "pass1": "",
-                "pass2": ""
+                "pass2": "",
+                "enable_2pass": False  # [修改] 2-Pass 状态下沉到具体参数中
             }
     return matrix
 
@@ -65,6 +66,137 @@ class PlainTextEdit(TextEdit):
     def insertFromMimeData(self, source: QMimeData):
         if source.hasText():
             self.insertPlainText(source.text())
+
+class DraggableListWidget(ListWidget):
+    """[新增] 支持拖拽重排并自动恢复 ItemWidget 的列表控件"""
+    itemDropped = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        # 触发信号以便主窗口重新绑定 Widget
+        self.itemDropped.emit()
+
+class BatchAddPopup(QDialog):
+    """[新增] 批量添加集数弹窗 (Popup 模式: 无边框, 点击外部关闭, 不可拖拽)"""
+    tasks_added = pyqtSignal(list, str) # episodes_list, mode
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 设置为 Popup 属性：无标题栏，点击窗口外自动关闭
+        self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setFixedSize(320, 220)
+        
+        # 简单样式
+        self.setStyleSheet("""
+            QDialog { 
+                background-color: #ffffff; 
+                border: 1px solid #dcdcdc; 
+                border-radius: 8px; 
+            }
+            QLabel { font-size: 14px; color: #333; }
+        """)
+        if parent and parent.is_dark:
+             self.setStyleSheet("""
+                QDialog { 
+                    background-color: #2b2b2b; 
+                    border: 1px solid #454545; 
+                    border-radius: 8px; 
+                }
+                QLabel { font-size: 14px; color: #ffffff; }
+            """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        # 标题
+        title = StrongBodyLabel("批量添加多集")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        # 范围输入 [ ] ~ [ ]
+        range_layout = QHBoxLayout()
+        self.input_start = LineEdit()
+        self.input_start.setPlaceholderText("01")
+        self.input_start.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        lbl_to = StrongBodyLabel("~")
+        
+        self.input_end = LineEdit()
+        self.input_end.setPlaceholderText("12")
+        self.input_end.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        range_layout.addWidget(self.input_start)
+        range_layout.addWidget(lbl_to)
+        range_layout.addWidget(self.input_end)
+        layout.addLayout(range_layout)
+
+        # 后缀输入
+        suffix_layout = QHBoxLayout()
+        lbl_suf = CaptionLabel("后缀(可选):")
+        self.input_suffix = LineEdit()
+        self.input_suffix.setPlaceholderText("[V2]")
+        suffix_layout.addWidget(lbl_suf)
+        suffix_layout.addWidget(self.input_suffix)
+        layout.addLayout(suffix_layout)
+
+        layout.addStretch(1)
+
+        # 按钮组
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+        
+        btn_sc = PushButton("简体")
+        btn_sc.clicked.connect(lambda: self._confirm("SC"))
+        
+        btn_tc = PushButton("繁体")
+        btn_tc.clicked.connect(lambda: self._confirm("TC"))
+        
+        btn_both = PrimaryPushButton("简繁")
+        btn_both.clicked.connect(lambda: self._confirm("BOTH"))
+
+        btn_layout.addWidget(btn_sc)
+        btn_layout.addWidget(btn_tc)
+        btn_layout.addWidget(btn_both)
+        layout.addLayout(btn_layout)
+
+    def _confirm(self, mode):
+        start_str = self.input_start.text().strip()
+        end_str = self.input_end.text().strip()
+        
+        if not start_str or not end_str:
+            InfoBar.warning(title="输入错误", content="请输入起始和结束集数", parent=self.parent())
+            return
+
+        try:
+            start = int(start_str)
+            end = int(end_str)
+        except ValueError:
+            InfoBar.error(title="输入错误", content="集数必须为数字", parent=self.parent())
+            return
+
+        if start > end:
+            start, end = end, start
+
+        # 确定填充长度，以输入的最长字符串为准，例如输入 01，则长度为2
+        pad_len = max(len(start_str), len(end_str))
+        
+        ep_list = []
+        for i in range(start, end + 1):
+            ep_list.append(str(i).zfill(pad_len))
+
+        # 这里的 parent() 是 MainWindow，通过信号或者直接调用方法
+        # 为了解耦，使用自定义信号，但这里为了方便直接调用父级方法，或者在父级 connect
+        if self.parent():
+            self.parent()._batch_add_callback(ep_list, mode, self.input_suffix.text().strip())
+        
+        self.close()
 
 class TaskItemWidget(QWidget):
     """自定义任务列表项 Widget"""
@@ -914,7 +1046,8 @@ class EncodeManager(QMainWindow):
         
         self.chk_2pass = CheckBox("启用 2-Pass Mode")
         self.chk_2pass.stateChanged.connect(self._toggle_2pass_ui)
-        self.chk_2pass.stateChanged.connect(self._save_current_profile_meta)
+        # [修改] 2-Pass 状态保存到具体的参数矩阵中，而不是 Profile 元数据
+        self.chk_2pass.stateChanged.connect(self._save_current_params) 
         control_bar_layout.addWidget(self.chk_2pass)
         
         layout.addLayout(control_bar_layout, 4, 0, 1, 3)
@@ -924,7 +1057,7 @@ class EncodeManager(QMainWindow):
         
         self.text_params_crf = PlainTextEdit()
         self.text_params_crf.setFixedHeight(80)
-        self.text_params_crf.textChanged.connect(self._save_current_param_text)
+        self.text_params_crf.textChanged.connect(self._save_current_params)
         layout.addWidget(self.text_params_crf, 5, 1, 1, 2)
         
         self.lbl_pass1 = StrongBodyLabel("Pass 1 参数:")
@@ -932,7 +1065,7 @@ class EncodeManager(QMainWindow):
         
         self.text_params_pass1 = PlainTextEdit()
         self.text_params_pass1.setFixedHeight(80)
-        self.text_params_pass1.textChanged.connect(self._save_current_param_text)
+        self.text_params_pass1.textChanged.connect(self._save_current_params)
         layout.addWidget(self.text_params_pass1, 6, 1, 1, 2)
         
         self.lbl_pass2 = StrongBodyLabel("Pass 2 参数:")
@@ -940,7 +1073,7 @@ class EncodeManager(QMainWindow):
         
         self.text_params_pass2 = PlainTextEdit()
         self.text_params_pass2.setFixedHeight(80)
-        self.text_params_pass2.textChanged.connect(self._save_current_param_text)
+        self.text_params_pass2.textChanged.connect(self._save_current_params)
         layout.addWidget(self.text_params_pass2, 7, 1, 1, 2)
         
         self._toggle_2pass_ui(0)
@@ -957,6 +1090,11 @@ class EncodeManager(QMainWindow):
         self.entry_ep.setPlaceholderText("01")
         self.entry_ep.textChanged.connect(self._save_current_profile_meta)
         layout.addWidget(self.entry_ep)
+        
+        # [新增] 批量添加按钮
+        btn_batch = PushButton(FIF.TILES, "批量多集")
+        btn_batch.clicked.connect(self._open_batch_dialog)
+        layout.addWidget(btn_batch)
         
         layout.addSpacing(15)
         
@@ -975,16 +1113,17 @@ class EncodeManager(QMainWindow):
         
         layout.addStretch(1)
         
-        btn_add_sc = PushButton(FIF.ADD, "添加简体")
-        btn_add_sc.clicked.connect(lambda: self._add_to_queue("SC"))
+        # [修改] 按钮名称简化
+        btn_add_sc = PushButton(FIF.ADD, "简体")
+        btn_add_sc.clicked.connect(lambda: self._add_tasks_from_ui("SC"))
         layout.addWidget(btn_add_sc)
         
-        btn_add_tc = PushButton(FIF.ADD, "添加繁体")
-        btn_add_tc.clicked.connect(lambda: self._add_to_queue("TC"))
+        btn_add_tc = PushButton(FIF.ADD, "繁体")
+        btn_add_tc.clicked.connect(lambda: self._add_tasks_from_ui("TC"))
         layout.addWidget(btn_add_tc)
         
-        btn_add_both = PrimaryPushButton(FIF.ADD, "添加简繁双语")
-        btn_add_both.clicked.connect(lambda: self._add_to_queue("BOTH"))
+        btn_add_both = PrimaryPushButton(FIF.ADD, "简繁")
+        btn_add_both.clicked.connect(lambda: self._add_tasks_from_ui("BOTH"))
         layout.addWidget(btn_add_both)
         return card
 
@@ -1001,10 +1140,11 @@ class EncodeManager(QMainWindow):
         header.addWidget(btn_clear)
         layout.addLayout(header)
         
-        self.queue_list = ListWidget()
-        self.queue_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        # [修改] 使用自定义的 DraggableListWidget
+        self.queue_list = DraggableListWidget()
         self.queue_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.queue_list.customContextMenuRequested.connect(self._show_queue_context_menu)
+        self.queue_list.itemDropped.connect(self._on_queue_item_dropped)
         
         # 允许 ItemWidget 自动调整大小以支持换行
         self.queue_list.setResizeMode(QListView.ResizeMode.Adjust)
@@ -1154,21 +1294,29 @@ class EncodeManager(QMainWindow):
     def _refresh_text_fields(self, hw: str, codec: str):
         profile = self.profiles[self.current_profile_name]
         params_matrix = profile.get("param_matrix", DEFAULT_PARAMS_TEMPLATE)
-        params = params_matrix.get(hw, {}).get(codec, {"crf": "", "pass1": "", "pass2": ""})
+        params = params_matrix.get(hw, {}).get(codec, {"crf": "", "pass1": "", "pass2": "", "enable_2pass": False})
         
         self.text_params_crf.blockSignals(True)
         self.text_params_pass1.blockSignals(True)
         self.text_params_pass2.blockSignals(True)
+        self.chk_2pass.blockSignals(True)
         
         self.text_params_crf.setPlainText(params.get("crf", ""))
         self.text_params_pass1.setPlainText(params.get("pass1", ""))
         self.text_params_pass2.setPlainText(params.get("pass2", ""))
         
+        # [修改] 从矩阵中读取 2-Pass 状态
+        enable_2pass = params.get("enable_2pass", False)
+        self.chk_2pass.setChecked(enable_2pass)
+        self._toggle_2pass_ui(2 if enable_2pass else 0)
+        
         self.text_params_crf.blockSignals(False)
         self.text_params_pass1.blockSignals(False)
         self.text_params_pass2.blockSignals(False)
+        self.chk_2pass.blockSignals(False)
 
-    def _save_current_param_text(self):
+    def _save_current_params(self):
+        """[修改] 保存当前参数文本以及 2-Pass 状态到矩阵"""
         if not self.current_profile_name: return
         
         hw = self.seg_hardware.currentItem().text()
@@ -1185,6 +1333,8 @@ class EncodeManager(QMainWindow):
         target["crf"] = self.text_params_crf.toPlainText()
         target["pass1"] = self.text_params_pass1.toPlainText()
         target["pass2"] = self.text_params_pass2.toPlainText()
+        # [新增] 保存 2-Pass 状态
+        target["enable_2pass"] = self.chk_2pass.isChecked()
         
         self._save_profiles_to_disk()
 
@@ -1202,7 +1352,8 @@ class EncodeManager(QMainWindow):
             "out_sc": self.entry_out_sc.text(),
             "out_tc": self.entry_out_tc.text(),
             "last_ep": self.entry_ep.text(),
-            "enable_2pass": self.chk_2pass.isChecked()
+            # [移除] enable_2pass 不再在元数据中全局保存，而是通过 matrix 保存
+            # "enable_2pass": self.chk_2pass.isChecked() 
         })
         self._save_profiles_to_disk()
 
@@ -1226,7 +1377,6 @@ class EncodeManager(QMainWindow):
             "param_matrix": profile_matrix, 
             "selected_hw": "CPU",
             "selected_codec": "X264",
-            "enable_2pass": False,
             "last_ep": "01"
         }
         self._refresh_profile_list()
@@ -1293,14 +1443,12 @@ class EncodeManager(QMainWindow):
         self.entry_out_tc.setText(data.get("out_tc", ""))
         self.entry_ep.setText(data.get("last_ep", "01"))
         
-        enable_2pass = data.get("enable_2pass", False)
-        self.chk_2pass.setChecked(enable_2pass)
-        self._toggle_2pass_ui(2 if enable_2pass else 0)
-        
         sel_hw = data.get("selected_hw", "CPU")
         sel_codec = data.get("selected_codec", "X264")
         self.seg_hardware.setCurrentItem(sel_hw)
         self.seg_codec.setCurrentItem(sel_codec)
+        
+        # 2-Pass 状态现在由 _refresh_text_fields 从 matrix 中加载
         
         self._block_signals(False)
         self._refresh_text_fields(sel_hw, sel_codec)
@@ -1349,14 +1497,22 @@ class EncodeManager(QMainWindow):
                 if "param_matrix" not in pdata:
                     new_matrix = copy.deepcopy(DEFAULT_PARAMS_TEMPLATE)
                     if "params_crf" in pdata:
+                        # 迁移旧数据
                         new_matrix["CPU"]["X264"] = {
                             "crf": pdata.get("params_crf", ""),
                             "pass1": pdata.get("params_pass1", ""),
-                            "pass2": pdata.get("params_pass2", "")
+                            "pass2": pdata.get("params_pass2", ""),
+                            "enable_2pass": pdata.get("enable_2pass", False)
                         }
                     pdata["param_matrix"] = new_matrix
                     pdata["selected_hw"] = "CPU"
                     pdata["selected_codec"] = "X264"
+                else:
+                    # 确保现有 matrix 结构包含 enable_2pass
+                    for hw in pdata["param_matrix"]:
+                        for codec in pdata["param_matrix"][hw]:
+                            if "enable_2pass" not in pdata["param_matrix"][hw][codec]:
+                                pdata["param_matrix"][hw][codec]["enable_2pass"] = False
 
             self._refresh_profile_list()
             if self.profiles: self._select_profile(list(self.profiles.keys())[0])
@@ -1371,19 +1527,44 @@ class EncodeManager(QMainWindow):
             InfoBar.error(title="错误", content=f"保存配置失败: {e}", parent=self)
 
     # ==================== 队列管理 ====================
-    def _add_to_queue(self, mode: str):
-        if not self.current_profile_name:
-            InfoBar.warning(title="警告", content="请先选择一个配置", parent=self)
-            return
+    
+    # [新增] 批量添加弹窗调用
+    def _open_batch_dialog(self):
+        popup = BatchAddPopup(self)
+        # 获取按钮位置以便对齐（可选，或者直接显示）
+        # 这里直接 exec (虽然是 Popup 属性，但 QDialog.exec 会阻塞)
+        # 由于要求无 Cancel/OK 且点外关闭，使用 show() 并依赖 WindowModality 或 Popup 行为
+        popup.show()
+        # 移动到鼠标附近或屏幕中心
+        center = self.geometry().center()
+        popup.move(center.x() - popup.width() // 2, center.y() - popup.height() // 2)
+
+    # [新增] 批量回调
+    def _batch_add_callback(self, ep_list, mode, suffix):
+        if not ep_list: return
+        for ep in ep_list:
+            self._add_task_internal(ep, mode, suffix)
+        self.queue_list.scrollToBottom()
+
+    def _add_tasks_from_ui(self, mode: str):
+        """UI 按钮触发的单集添加"""
         ep = self.entry_ep.text().strip()
         if not ep:
             InfoBar.warning(title="警告", content="请输入集数", parent=self)
             return
         
-        profile = copy.deepcopy(self.profiles[self.current_profile_name])
-        
         use_suffix = self.chk_suffix.isChecked()
         suffix_text = self.entry_suffix.text().strip() if use_suffix else ""
+        
+        self._add_task_internal(ep, mode, suffix_text)
+        self.queue_list.scrollToBottom()
+
+    def _add_task_internal(self, ep: str, mode: str, suffix_text: str):
+        if not self.current_profile_name:
+            InfoBar.warning(title="警告", content="请先选择一个配置", parent=self)
+            return
+            
+        profile = copy.deepcopy(self.profiles[self.current_profile_name])
         
         tasks = []
         if mode in ["SC", "BOTH"]: tasks.append({"type": "SC", "ep": ep, "profile": profile, "suffix": suffix_text})
@@ -1391,7 +1572,14 @@ class EncodeManager(QMainWindow):
         
         for task in tasks:
             display_suffix = f" {task['suffix']}" if task['suffix'] else ""
-            mode_tag = " [2-Pass]" if profile.get('enable_2pass') else ""
+            
+            # 这里的 2-Pass 状态从选定的 HW/Codec matrix 中获取，而不是全局
+            hw = profile.get("selected_hw", "CPU")
+            codec = profile.get("selected_codec", "X264")
+            p_matrix = profile.get("param_matrix", DEFAULT_PARAMS_TEMPLATE)
+            is_2pass = p_matrix.get(hw, {}).get(codec, {}).get("enable_2pass", False)
+            
+            mode_tag = " [2-Pass]" if is_2pass else ""
             desc = f"[{task['type']}] EP{task['ep']}{display_suffix}{mode_tag} - {self.current_profile_name}"
             
             item_data = {
@@ -1399,20 +1587,41 @@ class EncodeManager(QMainWindow):
                 "desc": desc, "status": "pending", "raw_task": task
             }
             
-            # 使用自定义 Item Widget
             list_item = QListWidgetItem()
             list_item.setData(Qt.ItemDataRole.UserRole, item_data)
             self.queue_list.addItem(list_item)
             
             item_widget = TaskItemWidget(desc)
-            # 初始高度，QListWidget ResizeMode Adjust 会处理后续高度
             list_item.setSizeHint(item_widget.sizeHint())
             self.queue_list.setItemWidget(list_item, item_widget)
             
             if not task['suffix']:
                 key = (task['ep'], task['type'])
                 self.completed_history.discard(key)
-        self.queue_list.scrollToBottom()
+
+    # [新增] 处理列表项拖拽放置事件
+    def _on_queue_item_dropped(self):
+        """列表项位置改变后，重建 Widget"""
+        for i in range(self.queue_list.count()):
+            item = self.queue_list.item(i)
+            # 检查是否有 Widget，如果没有则重建
+            if self.queue_list.itemWidget(item) is None:
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if data:
+                    widget = TaskItemWidget(data['desc'])
+                    # 恢复状态
+                    if data['status'] == 'done':
+                        widget.set_status(progress=1.0, status_code=2)
+                    elif data['status'] == 'error':
+                         widget.set_status(progress=0.0, status_code=3)
+                    elif data['status'] == 'running':
+                        # 如果正在运行却被拖动了，理论上应该禁止，但这里做恢复
+                        # 实际上运行中的任务被拖动可能会导致索引错乱，
+                        # 但由于我们基于 current_item 对象操作，只要 current_item 引用还在就行
+                        widget.set_status(progress=0.0, status_code=1) # 进度可能丢失显示，直到下次刷新
+                    
+                    item.setSizeHint(widget.sizeHint())
+                    self.queue_list.setItemWidget(item, widget)
 
     def _show_queue_context_menu(self, pos):
         item = self.queue_list.itemAt(pos)
@@ -1492,7 +1701,7 @@ class EncodeManager(QMainWindow):
         hw = profile.get("selected_hw", "CPU")
         codec = profile.get("selected_codec", "X264")
         params_matrix = profile.get("param_matrix", DEFAULT_PARAMS_TEMPLATE)
-        params_set = params_matrix.get(hw, {}).get(codec, {"crf": "", "pass1": "", "pass2": ""})
+        params_set = params_matrix.get(hw, {}).get(codec, {"crf": "", "pass1": "", "pass2": "", "enable_2pass": False})
         
         src_name = profile['source_temp'].replace('<ep>', ep)
         full_src = os.path.join(profile['source_dir'], src_name)
@@ -1516,10 +1725,13 @@ class EncodeManager(QMainWindow):
             self._task_finished_callback(False, full_out, "0s")
             return
         
+        # [修改] 读取 matrix 中的 2-Pass 设置
+        is_2pass = params_set.get("enable_2pass", False)
+        
         commands = self._build_ffmpeg_commands(
-            profile, params_set, full_src, full_sub, sub_name, full_out
+            params_set, full_src, full_sub, sub_name, full_out, is_2pass, profile['sub_dir']
         )
-        temp_files = self._get_temp_files(profile) if profile.get('enable_2pass') else []
+        temp_files = self._get_temp_files(profile['sub_dir']) if is_2pass else []
         self.progress_dashboard.start_timer()
         self.worker = Worker(commands, profile['sub_dir'], full_out, temp_files)
         self.worker.log_signal.connect(self._log_to_ui)
@@ -1528,9 +1740,8 @@ class EncodeManager(QMainWindow):
         self.worker.finished_signal.connect(self._task_finished_callback)
         self.worker.start()
 
-    def _build_ffmpeg_commands(self, profile: Dict, params_set: Dict, full_src: str, 
-                               full_sub: str, sub_name: str, full_out: str) -> List[str]:
-        is_2pass = profile.get('enable_2pass', False)
+    def _build_ffmpeg_commands(self, params_set: Dict, full_src: str, 
+                               full_sub: str, sub_name: str, full_out: str, is_2pass: bool, sub_dir: str) -> List[str]:
         commands = []
         if is_2pass:
             params_1 = self._sanitize_params(params_set.get("pass1", ""))
@@ -1539,7 +1750,7 @@ class EncodeManager(QMainWindow):
             has_pass2 = "-pass 2" in params_2 or "-pass=2" in params_2
             has_passlog1 = "-passlogfile" in params_1
             has_passlog2 = "-passlogfile" in params_2
-            pass_log_path = os.path.join(profile['sub_dir'], "ffmpeg2pass")
+            pass_log_path = os.path.join(sub_dir, "ffmpeg2pass")
             pass1_prefix = "" if has_pass1 else "-pass 1 "
             passlog1_prefix = "" if has_passlog1 else f'-passlogfile "{pass_log_path}" '
             cmd1 = (f'ffmpeg -y -i "{full_src}" -vf "subtitles=\'{sub_name}\'" '
@@ -1560,8 +1771,8 @@ class EncodeManager(QMainWindow):
         if not param_text: return ""
         return param_text.replace('\n', ' ').replace('\r', '').strip()
 
-    def _get_temp_files(self, profile: Dict) -> List[str]:
-        pass_log_path = os.path.join(profile['sub_dir'], "ffmpeg2pass")
+    def _get_temp_files(self, sub_dir: str) -> List[str]:
+        pass_log_path = os.path.join(sub_dir, "ffmpeg2pass")
         return [f"{pass_log_path}-0.log", f"{pass_log_path}-0.log.mbtree"]
 
     def _log_to_ui(self, text: str):
