@@ -773,10 +773,10 @@ class EncodeManager(QMainWindow):
         # 从设置中加载主题配置
         theme_mode = self.app_settings.get("theme_mode", "light")
         self.is_dark = (theme_mode == "dark")
-        self._init_ui()
         
-        # 【修改点2】确保所有UI创建完毕后再应用主题，这样确认按钮才能获得初始样式
-        self._apply_theme(self.is_dark) 
+        # 【关键修改】先创建 UI，再应用主题
+        self._init_ui()
+        # self._apply_theme(self.is_dark)
         
         self._load_profiles()
 
@@ -1219,47 +1219,56 @@ class EncodeManager(QMainWindow):
         self._apply_theme(self.is_dark)
         
     def _apply_theme(self, is_dark: bool):
-            # 强制修正确认按钮的样式，确保红底白字
-            stop_btn_style = "QPushButton { background-color: #d13438; border: 1px solid #d13438; color: white; border-radius: 4px; }"
-            if self.btn_confirm_stop:
-                self.btn_confirm_stop.setStyleSheet(stop_btn_style)
+        # 强制修正确认按钮的样式，确保红底白字
+        stop_btn_style = "QPushButton { background-color: #d13438; border: 1px solid #d13438; color: white; border-radius: 4px; }"
+        if self.btn_confirm_stop:
+            self.btn_confirm_stop.setStyleSheet(stop_btn_style)
 
+        # 【修改】延迟调用 setTheme 和 setThemeColor
+        try:
             if is_dark:
                 setTheme(Theme.DARK)
                 setThemeColor("#FF9900")
-                self.setStyleSheet("""
-                    QMainWindow { background-color: #303030; }
-                    QListWidget { background-color: #383838; border: 1px solid #454545; color: white; }
-                    QListWidget::item:selected { background-color: #454545; }
-                    QTextEdit, QPlainTextEdit, LineEdit, PlainLineEdit { 
-                        background-color: #383838; color: white; border: 1px solid #454545; border-radius: 4px;
-                    }
-                    SubtitleLabel#MetricValue { color: #FF9900; }
-                    /* TaskItem Label color fix */
-                    QLabel { color: white; }
-                """)
-                if hasattr(self, 'lbl_pass1'): self.lbl_pass1.setStyleSheet("color: #FF9900; font-weight: bold;")
-                if hasattr(self, 'lbl_pass2'): self.lbl_pass2.setStyleSheet("color: #FF9900; font-weight: bold;")
             else:
                 setTheme(Theme.LIGHT)
                 setThemeColor("#009FAA")
-                self.setStyleSheet("""
-                    QMainWindow { background-color: #f3f3f3; }
-                    SubtitleLabel#MetricValue { color: #0078D7; }
-                    /* TaskItem Label color fix */
-                    QLabel { color: black; }
-                """)
-                if hasattr(self, 'lbl_pass1'): self.lbl_pass1.setStyleSheet("color: #0078D7; font-weight: bold;")
-                if hasattr(self, 'lbl_pass2'): self.lbl_pass2.setStyleSheet("color: #0078D7; font-weight: bold;")
+        except Exception as e:
+            print(f"Theme setting error: {e}")
 
-            if sys.platform == "win32":
-                try:
-                    hwnd = int(self.winId())
-                    value = c_int(1 if is_dark else 0)
-                    windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(value), sizeof(value))
-                    self.repaint()
-                except Exception:
-                    pass
+        if is_dark:
+            self.setStyleSheet("""
+                QMainWindow { background-color: #303030; }
+                QListWidget { background-color: #383838; border: 1px solid #454545; color: white; }
+                QListWidget::item:selected { background-color: #454545; }
+                QTextEdit, QPlainTextEdit, LineEdit, PlainLineEdit { 
+                    background-color: #383838; color: white; border: 1px solid #454545; border-radius: 4px;
+                }
+                SubtitleLabel#MetricValue { color: #FF9900; }
+                QLabel { color: white; }
+            """)
+            if hasattr(self, 'lbl_pass1'): 
+                self.lbl_pass1.setStyleSheet("color: #FF9900; font-weight: bold;")
+            if hasattr(self, 'lbl_pass2'): 
+                self.lbl_pass2.setStyleSheet("color: #FF9900; font-weight: bold;")
+        else:
+            self.setStyleSheet("""
+                QMainWindow { background-color: #f3f3f3; }
+                SubtitleLabel#MetricValue { color: #0078D7; }
+                QLabel { color: black; }
+            """)
+            if hasattr(self, 'lbl_pass1'): 
+                self.lbl_pass1.setStyleSheet("color: #0078D7; font-weight: bold;")
+            if hasattr(self, 'lbl_pass2'): 
+                self.lbl_pass2.setStyleSheet("color: #0078D7; font-weight: bold;")
+
+        if sys.platform == "win32":
+            try:
+                hwnd = int(self.winId())
+                value = c_int(1 if is_dark else 0)
+                windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(value), sizeof(value))
+                self.repaint()
+            except Exception:
+                pass
 
     def _open_settings_dialog(self):
         dialog = SettingsDialog(self, self.app_settings, self.is_dark)
@@ -1891,7 +1900,6 @@ class EncodeManager(QMainWindow):
 # ==================== 程序入口 ====================
 def main():
     app = QApplication(sys.argv)
-    setTheme(Theme.LIGHT)
     window = EncodeManager()
     window.show()
     sys.exit(app.exec())
