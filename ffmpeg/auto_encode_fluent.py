@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QFrame, QListWidgetItem, QAbstractItemView,
     QSplitter, QGridLayout, QMessageBox, QInputDialog, QDialog, 
     QStackedWidget, QDialogButtonBox, QLabel, QButtonGroup,
-    QSizePolicy, QListView
+    QSizePolicy, QListView, QSystemTrayIcon, QMenu, QScrollArea
 )
 
 from qfluentwidgets import (
@@ -166,10 +166,14 @@ class BatchAddPopup(QDialog):
         
         btn_both = PrimaryPushButton("简繁")
         btn_both.clicked.connect(lambda: self._confirm("BOTH"))
+        
+        btn_no_sub = PushButton("无字幕")
+        btn_no_sub.clicked.connect(lambda: self._confirm("NO_SUB"))
 
         btn_layout.addWidget(btn_sc)
         btn_layout.addWidget(btn_tc)
         btn_layout.addWidget(btn_both)
+        btn_layout.addWidget(btn_no_sub)
         layout.addLayout(btn_layout)
 
     def _confirm(self, mode):
@@ -240,50 +244,58 @@ class TaskItemWidget(QWidget):
         self.update() # 触发重绘
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # 获取控件区域
-        full_rect = self.rect()
-        
-        # 【关键修改】调整绘制区域以匹配 Fluent UI 列表项选中态的背景大小
-        # 通常 Fluent List Item 有左右 4px，上下 2px 的边距
-        draw_rect = full_rect.adjusted(4, 2, -4, -2)
-        
-        # 定义圆角路径 (圆角半径通常为 4 或 6)
-        path = QPainterPath()
-        path.addRoundedRect(draw_rect.x(), draw_rect.y(), draw_rect.width(), draw_rect.height(), 6, 6)
-        
-        # 1. 绘制完成或失败的背景
-        if self.status_code == 2: # Done
-             painter.fillPath(path, QColor(0, 200, 0, 40)) # 绿色背景
-        elif self.status_code == 3: # Error
-             painter.fillPath(path, QColor(255, 0, 0, 40)) # 红色背景
-        
-        # 2. 绘制进度条 (作为动态背景)
-        elif self.status_code == 1 and self.progress > 0: # Running
-            # 进度条颜色区分
-            if self.pass_type == 1:
-                # Pass 1: 蓝色系
-                color_start = QColor(0, 120, 215, 90)
-                color_end = QColor(0, 120, 215, 40)
-            else:
-                # CRF / Pass 2: 绿色系
-                color_start = QColor(0, 180, 60, 90)
-                color_end = QColor(0, 180, 60, 40)
+        try:
+            painter = QPainter(self)
+            if not painter.isActive():
+                return
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             
-            # 计算进度宽度 (基于调整后的 draw_rect)
-            prog_width = int(draw_rect.width() * self.progress)
+            # 获取控件区域
+            full_rect = self.rect()
             
-            # 创建裁剪区域，确保进度条不超出圆角矩形
-            painter.setClipPath(path)
+            # 【关键修改】调整绘制区域以匹配 Fluent UI 列表项选中态的背景大小
+            # 通常 Fluent List Item 有左右 4px，上下 2px 的边距
+            draw_rect = full_rect.adjusted(4, 2, -4, -2)
             
-            # 绘制渐变
-            prog_rect = QRect(draw_rect.x(), draw_rect.y(), prog_width, draw_rect.height())
-            gradient = QLinearGradient(draw_rect.x(), 0, draw_rect.x() + prog_width, 0)
-            gradient.setColorAt(0, color_start)
-            gradient.setColorAt(1, color_end)
-            painter.fillRect(prog_rect, QBrush(gradient))
+            # 定义圆角路径 (圆角半径通常为 4 或 6)
+            path = QPainterPath()
+            path.addRoundedRect(draw_rect.x(), draw_rect.y(), draw_rect.width(), draw_rect.height(), 6, 6)
+            
+            # 1. 绘制完成或失败的背景
+            if self.status_code == 2: # Done
+                 painter.fillPath(path, QColor(0, 200, 0, 40)) # 绿色背景
+            elif self.status_code == 3: # Error
+                 painter.fillPath(path, QColor(255, 0, 0, 40)) # 红色背景
+            
+            # 2. 绘制进度条 (作为动态背景)
+            elif self.status_code == 1 and self.progress > 0: # Running
+                # 进度条颜色区分
+                if self.pass_type == 1:
+                    # Pass 1: 蓝色系
+                    color_start = QColor(0, 120, 215, 90)
+                    color_end = QColor(0, 120, 215, 40)
+                else:
+                    # CRF / Pass 2: 绿色系
+                    color_start = QColor(0, 180, 60, 90)
+                    color_end = QColor(0, 180, 60, 40)
+                
+                # 计算进度宽度 (基于调整后的 draw_rect)
+                prog_width = int(draw_rect.width() * self.progress)
+                
+                # 创建裁剪区域，确保进度条不超出圆角矩形
+                painter.setClipPath(path)
+                
+                # 绘制渐变
+                prog_rect = QRect(draw_rect.x(), draw_rect.y(), prog_width, draw_rect.height())
+                gradient = QLinearGradient(draw_rect.x(), 0, draw_rect.x() + prog_width, 0)
+                gradient.setColorAt(0, color_start)
+                gradient.setColorAt(1, color_end)
+                painter.fillRect(prog_rect, QBrush(gradient))
+            
+            painter.end()
+        except RuntimeError:
+            # Widget 的 C++ 对象已被销毁
+            pass
 
         super().paintEvent(event)
 
@@ -375,7 +387,14 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None, current_settings=None, is_dark=False):
         super().__init__(parent)
         self.setWindowTitle("全局设置")
-        self.resize(1000, 700)
+        self.setMinimumHeight(400)
+        self.setMinimumWidth(800)
+        
+        saved_size = current_settings.get("settings_dialog_size", None) if current_settings else None
+        if saved_size and len(saved_size) == 2:
+            self.resize(saved_size[0], saved_size[1])
+        else:
+            self.resize(1000, 700)
         
         self.raw_settings = copy.deepcopy(current_settings) if current_settings else {}
         defaults = self.raw_settings.get("default_params_matrix", DEFAULT_PARAMS_TEMPLATE)
@@ -391,6 +410,11 @@ class SettingsDialog(QDialog):
         self.input_folder_name = PlainLineEdit()
         self.chk_auto_ep_encode = CheckBox("压制完成后集数自动 +1")
         self.chk_auto_ep_mux = CheckBox("封装完成后集数自动 +1")
+        self.chk_ep_not_shared = CheckBox("两边集数不共享")
+        
+        from qfluentwidgets import RadioButton
+        self.radio_close_to_tray = RadioButton("最小化到托盘")
+        self.radio_close_exit = RadioButton("关闭工具")
 
         self._init_ui()
         self._load_general_data()
@@ -443,6 +467,11 @@ class SettingsDialog(QDialog):
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(20, 20, 20, 20)
         
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
         self.stacked_widget = QStackedWidget()
         self.stacked_widget.addWidget(self._create_general_page())
         
@@ -450,7 +479,8 @@ class SettingsDialog(QDialog):
             page = ParamEditorPage(hw, self.param_matrix)
             self.stacked_widget.addWidget(page)
         
-        right_layout.addWidget(self.stacked_widget)
+        scroll_area.setWidget(self.stacked_widget)
+        right_layout.addWidget(scroll_area)
         
         btn_layout = QHBoxLayout()
         btn_layout.addStretch(1)
@@ -539,7 +569,28 @@ class SettingsDialog(QDialog):
         self.chk_auto_ep_mux.setChecked(True)
         auto_layout.addWidget(self.chk_auto_ep_mux)
         
+        self.chk_ep_not_shared.setToolTip("启用后，\"有字幕\"和\"无字幕\"模式的集数独立计数；禁用时，一方压制完成会同步更新另一方的集数")
+        auto_layout.addWidget(self.chk_ep_not_shared)
+        
         layout.addWidget(auto_card)
+        
+        # 关闭行为设置
+        layout.addWidget(SubtitleLabel("关闭行为"))
+        
+        close_card = CardWidget()
+        close_layout = QVBoxLayout(close_card)
+        close_layout.setContentsMargins(20, 15, 20, 15)
+        close_layout.setSpacing(10)
+        
+        self.close_btn_group = QButtonGroup(self)
+        self.close_btn_group.addButton(self.radio_close_to_tray, 0)
+        self.close_btn_group.addButton(self.radio_close_exit, 1)
+        
+        close_layout.addWidget(self.radio_close_to_tray)
+        close_layout.addWidget(self.radio_close_exit)
+        
+        layout.addWidget(close_card)
+        
         return page
 
     def _switch_page(self, row):
@@ -567,6 +618,13 @@ class SettingsDialog(QDialog):
         self.input_assfontsubset_path.setText(self.raw_settings.get("assfontsubset_path", ""))
         self.chk_auto_ep_encode.setChecked(self.raw_settings.get("auto_ep_encode", True))
         self.chk_auto_ep_mux.setChecked(self.raw_settings.get("auto_ep_mux", True))
+        self.chk_ep_not_shared.setChecked(self.raw_settings.get("ep_not_shared", False))
+        
+        close_behavior = self.raw_settings.get("close_behavior", "tray")
+        if close_behavior == "exit":
+            self.radio_close_exit.setChecked(True)
+        else:
+            self.radio_close_to_tray.setChecked(True)
 
     def get_current_settings_dict(self) -> Dict:
         settings = copy.deepcopy(self.raw_settings)
@@ -578,7 +636,10 @@ class SettingsDialog(QDialog):
             "mkvmerge_path": self.input_mkvmerge_path.text(),
             "assfontsubset_path": self.input_assfontsubset_path.text(),
             "auto_ep_encode": self.chk_auto_ep_encode.isChecked(),
-            "auto_ep_mux": self.chk_auto_ep_mux.isChecked()
+            "auto_ep_mux": self.chk_auto_ep_mux.isChecked(),
+            "ep_not_shared": self.chk_ep_not_shared.isChecked(),
+            "close_behavior": "exit" if self.radio_close_exit.isChecked() else "tray",
+            "settings_dialog_size": [self.width(), self.height()]
         })
         return settings
 
@@ -741,11 +802,22 @@ class Worker(QThread):
             
             while True:
                 if self.is_killed: break
-                line = self.process.stdout.readline()
+                try:
+                    line = self.process.stdout.readline()
+                except (OSError, ValueError):
+                    # 管道已关闭或进程已终止
+                    break
                 if not line and self.process.poll() is not None: break
-                if line: self._process_output_line(line.strip(), pass_index)
+                if line:
+                    try:
+                        self._process_output_line(line.strip(), pass_index)
+                    except Exception:
+                        pass  # 防止解析异常输出时崩溃
 
-            return_code = self.process.poll()
+            try:
+                return_code = self.process.poll()
+            except Exception:
+                return False
             if self.is_killed: return False
             if return_code == 0: return True
             self.log_signal.emit(f"🔴 [错误] FFmpeg 异常退出，代码 {return_code}")
@@ -921,6 +993,7 @@ class EncodeManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("smzase 自用压制工具")
+        self._load_app_icon()
         
         # 1. 初始化基础路径逻辑
         default_docs = os.path.join(os.path.expanduser("~"), "Documents")
@@ -961,7 +1034,68 @@ class EncodeManager(QMainWindow):
         self._init_ui()
         # self._apply_theme(self.is_dark)
         
+        # 初始化系统托盘
+        self._init_tray_icon()
+        
         self._load_profiles()
+
+    def _load_app_icon(self):
+        """加载应用程序图标"""
+        from PyQt6.QtGui import QIcon
+        icon_paths = [
+            os.path.join(os.path.dirname(__file__), "konoha.ico"),
+            os.path.join(os.getcwd(), "konoha.ico"),
+            "konoha.ico"
+        ]
+        for icon_path in icon_paths:
+            if os.path.exists(icon_path):
+                icon = QIcon(icon_path)
+                if not icon.isNull():
+                    self.setWindowIcon(icon)
+                    return
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(QColor(0, 159, 170))
+        self.setWindowIcon(QIcon(pixmap))
+
+    def _init_tray_icon(self):
+        """初始化系统托盘图标"""
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(self.windowIcon())
+        self.tray_icon.setToolTip("smzase 自用压制工具")
+        
+        # 托盘菜单
+        tray_menu = QMenu(self)
+        action_show = QAction("显示主窗口", self)
+        action_show.triggered.connect(self._tray_show_window)
+        tray_menu.addAction(action_show)
+        
+        tray_menu.addSeparator()
+        
+        action_quit = QAction("退出", self)
+        action_quit.triggered.connect(self._tray_quit)
+        tray_menu.addAction(action_quit)
+        
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+
+    def _tray_show_window(self):
+        """从托盘恢复主窗口"""
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+
+    def _on_tray_activated(self, reason):
+        """托盘图标被激活（双击或单击）"""
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            # 单击托盘图标
+            self._tray_show_window()
+        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._tray_show_window()
+
+    def _tray_quit(self):
+        """从托盘菜单退出程序"""
+        self._force_quit = True
+        self.close()
 
     def _restore_window_geometry(self):
         """恢复窗口几何信息，如果不存在则使用默认"""
@@ -1017,7 +1151,8 @@ class EncodeManager(QMainWindow):
             "theme_mode": "light",
             "mkvmerge_path": "",
             "assfontsubset_path": "",
-            "last_workflow": "encode"
+            "last_workflow": "encode",
+            "close_behavior": "tray"
         }
         
         if file_found:
@@ -1087,8 +1222,10 @@ class EncodeManager(QMainWindow):
     def _on_workflow_changed(self, route_key):
         if route_key == "encode":
             self.stacked_workflow.setCurrentIndex(0)
+            self.seg_subtitle_mode.show()
         else:
             self.stacked_workflow.setCurrentIndex(1)
+            self.seg_subtitle_mode.hide()
         self.app_settings["last_workflow"] = route_key
 
     def _create_profile_panel(self) -> CardWidget:
@@ -1170,19 +1307,51 @@ class EncodeManager(QMainWindow):
         layout.setVerticalSpacing(10)
         layout.setHorizontalSpacing(15)
         
-        # 5. 强制设置第一列（标签列）的最小宽度，防止界面抖动并对齐
         layout.setColumnMinimumWidth(0, 90)
         
-        self.entry_source_dir = self._add_folder_row(layout, 0, "源视频目录")
-        self.entry_sub_dir = self._add_folder_row(layout, 1, "字幕目录")
-        self.entry_output_dir = self._add_folder_row(layout, 2, "输出目录")
+        subtitle_mode_layout = QHBoxLayout()
+        self.seg_subtitle_mode = SegmentedWidget()
+        self.seg_subtitle_mode.addItem(routeKey="with_sub", text="有字幕")
+        self.seg_subtitle_mode.addItem(routeKey="no_sub", text="无字幕")
+        self.seg_subtitle_mode.setCurrentItem("with_sub")
+        self.seg_subtitle_mode.currentItemChanged.connect(self._on_subtitle_mode_changed)
+        subtitle_mode_layout.addWidget(self.seg_subtitle_mode)
+        subtitle_mode_layout.addStretch(1)
+        layout.addLayout(subtitle_mode_layout, 0, 0, 1, 3)
         
-        layout.addWidget(self._create_template_group(), 3, 0, 1, 3)
+        self.entry_source_dir = self._add_folder_row(layout, 1, "源视频目录")
+        
+        self.label_source_no_sub = StrongBodyLabel("源视频文件")
+        layout.addWidget(self.label_source_no_sub, 2, 0)
+        self.entry_source_no_sub = PlainLineEdit()
+        self.entry_source_no_sub.setPlaceholderText("Title - S01E<ep>.mkv")
+        layout.addWidget(self.entry_source_no_sub, 2, 1, 1, 2)
+        self.label_source_no_sub.hide()
+        self.entry_source_no_sub.hide()
+        
+        self.label_sub_dir = StrongBodyLabel("字幕目录")
+        layout.addWidget(self.label_sub_dir, 3, 0)
+        self.entry_sub_dir = PlainLineEdit()
+        layout.addWidget(self.entry_sub_dir, 3, 1)
+        self.btn_sub_dir = PushButton(FIF.FOLDER, "浏览")
+        self.btn_sub_dir.clicked.connect(lambda: self._browse_folder(self.entry_sub_dir))
+        layout.addWidget(self.btn_sub_dir, 3, 2)
+        
+        self.entry_output_dir = self._add_folder_row(layout, 4, "输出目录")
+        
+        self.template_group = self._create_template_group()
+        layout.addWidget(self.template_group, 5, 0, 1, 3)
+        
+        self.no_sub_group = self._create_no_sub_group()
+        layout.addWidget(self.no_sub_group, 5, 0, 1, 3)
+        self.no_sub_group.hide()
+        
         self._add_params_section(layout)
         
         for widget in [self.entry_source_dir, self.entry_sub_dir, self.entry_output_dir,
                       self.entry_source_template, self.entry_sub_sc, self.entry_sub_tc,
-                      self.entry_out_sc, self.entry_out_tc]:
+                      self.entry_out_sc, self.entry_out_tc, self.entry_source_no_sub,
+                      self.entry_out_no_sub]:
             widget.textChanged.connect(self._save_current_profile_meta)
         
         return card
@@ -1199,16 +1368,15 @@ class EncodeManager(QMainWindow):
     def _create_template_group(self) -> QFrame:
         group = QFrame()
         layout = QGridLayout(group)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setColumnMinimumWidth(0, 90) # 对齐内部网格的第一列
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setVerticalSpacing(10)
+        layout.setColumnMinimumWidth(0, 90)
         
-        # Row 0: Source Template (Wider)
         layout.addWidget(StrongBodyLabel("源视频文件"), 0, 0)
         self.entry_source_template = PlainLineEdit()
         self.entry_source_template.setPlaceholderText("Title - S01E<ep>.mkv")
-        layout.addWidget(self.entry_source_template, 0, 1, 1, 3) # Span 3 cols
+        layout.addWidget(self.entry_source_template, 0, 1, 1, 3)
         
-        # Row 1: SC
         layout.addWidget(StrongBodyLabel("简体字幕"), 1, 0)
         self.entry_sub_sc = PlainLineEdit()
         self.entry_sub_sc.setFixedWidth(140)
@@ -1221,7 +1389,6 @@ class EncodeManager(QMainWindow):
         self.entry_out_sc.setPlaceholderText("Title - S01E<ep> - [CHS_JP].mp4")
         layout.addWidget(self.entry_out_sc, 1, 3)
         
-        # Row 2: TC
         layout.addWidget(StrongBodyLabel("繁体字幕"), 2, 0)
         self.entry_sub_tc = PlainLineEdit()
         self.entry_sub_tc.setFixedWidth(140)
@@ -1233,6 +1400,21 @@ class EncodeManager(QMainWindow):
         self.entry_out_tc = PlainLineEdit()
         self.entry_out_tc.setPlaceholderText("Title - S01E<ep> - [CHT_JP].mp4")
         layout.addWidget(self.entry_out_tc, 2, 3)
+        
+        return group
+
+    def _create_no_sub_group(self) -> QFrame:
+        group = QFrame()
+        layout = QHBoxLayout(group)
+        layout.setContentsMargins(0, 10, 0, 0)
+        
+        label = StrongBodyLabel("输出名称")
+        label.setFixedWidth(90)
+        layout.addWidget(label)
+        
+        self.entry_out_no_sub = PlainLineEdit()
+        self.entry_out_no_sub.setPlaceholderText("Title - S01E<ep>.mp4")
+        layout.addWidget(self.entry_out_no_sub, 1)
         
         return group
 
@@ -1263,31 +1445,31 @@ class EncodeManager(QMainWindow):
         self.chk_2pass.stateChanged.connect(self._save_current_params) 
         control_bar_layout.addWidget(self.chk_2pass)
         
-        layout.addLayout(control_bar_layout, 4, 0, 1, 3)
+        layout.addLayout(control_bar_layout, 6, 0, 1, 3)
 
         self.lbl_crf = StrongBodyLabel("CRF/单次参数:")
-        layout.addWidget(self.lbl_crf, 5, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.lbl_crf, 7, 0, Qt.AlignmentFlag.AlignTop)
         
         self.text_params_crf = PlainTextEdit()
         self.text_params_crf.setFixedHeight(80)
         self.text_params_crf.textChanged.connect(self._save_current_params)
-        layout.addWidget(self.text_params_crf, 5, 1, 1, 2)
+        layout.addWidget(self.text_params_crf, 7, 1, 1, 2)
         
         self.lbl_pass1 = StrongBodyLabel("Pass 1 参数:")
-        layout.addWidget(self.lbl_pass1, 6, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.lbl_pass1, 8, 0, Qt.AlignmentFlag.AlignTop)
         
         self.text_params_pass1 = PlainTextEdit()
         self.text_params_pass1.setFixedHeight(80)
         self.text_params_pass1.textChanged.connect(self._save_current_params)
-        layout.addWidget(self.text_params_pass1, 6, 1, 1, 2)
+        layout.addWidget(self.text_params_pass1, 8, 1, 1, 2)
         
         self.lbl_pass2 = StrongBodyLabel("Pass 2 参数:")
-        layout.addWidget(self.lbl_pass2, 7, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.lbl_pass2, 9, 0, Qt.AlignmentFlag.AlignTop)
         
         self.text_params_pass2 = PlainTextEdit()
         self.text_params_pass2.setFixedHeight(80)
         self.text_params_pass2.textChanged.connect(self._save_current_params)
-        layout.addWidget(self.text_params_pass2, 7, 1, 1, 2)
+        layout.addWidget(self.text_params_pass2, 9, 1, 1, 2)
         
         self._toggle_2pass_ui(0)
 
@@ -1296,7 +1478,8 @@ class EncodeManager(QMainWindow):
         layout = QHBoxLayout(card)
         layout.setContentsMargins(20, 15, 20, 15)
         
-        layout.addWidget(SubtitleLabel("集数"))
+        self.label_ep = SubtitleLabel("集数")
+        layout.addWidget(self.label_ep)
         self.entry_ep = PlainLineEdit()
         self.entry_ep.setFixedWidth(80)
         self.entry_ep.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1304,7 +1487,14 @@ class EncodeManager(QMainWindow):
         self.entry_ep.textChanged.connect(self._save_current_profile_meta)
         layout.addWidget(self.entry_ep)
         
-        # [新增] 批量添加按钮
+        self.entry_ep_no_sub = PlainLineEdit()
+        self.entry_ep_no_sub.setFixedWidth(80)
+        self.entry_ep_no_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.entry_ep_no_sub.setPlaceholderText("01")
+        self.entry_ep_no_sub.textChanged.connect(self._save_current_profile_meta)
+        layout.addWidget(self.entry_ep_no_sub)
+        self.entry_ep_no_sub.hide()
+        
         btn_batch = PushButton(FIF.TILES, "批量多集")
         btn_batch.clicked.connect(self._open_batch_dialog)
         layout.addWidget(btn_batch)
@@ -1326,18 +1516,23 @@ class EncodeManager(QMainWindow):
         
         layout.addStretch(1)
         
-        # [修改] 按钮名称简化
-        btn_add_sc = PushButton(FIF.ADD, "简体")
-        btn_add_sc.clicked.connect(lambda: self._add_tasks_from_ui("SC"))
-        layout.addWidget(btn_add_sc)
+        self.btn_add_sc = PushButton(FIF.ADD, "简体")
+        self.btn_add_sc.clicked.connect(lambda: self._add_tasks_from_ui("SC"))
+        layout.addWidget(self.btn_add_sc)
         
-        btn_add_tc = PushButton(FIF.ADD, "繁体")
-        btn_add_tc.clicked.connect(lambda: self._add_tasks_from_ui("TC"))
-        layout.addWidget(btn_add_tc)
+        self.btn_add_tc = PushButton(FIF.ADD, "繁体")
+        self.btn_add_tc.clicked.connect(lambda: self._add_tasks_from_ui("TC"))
+        layout.addWidget(self.btn_add_tc)
         
-        btn_add_both = PrimaryPushButton(FIF.ADD, "简繁")
-        btn_add_both.clicked.connect(lambda: self._add_tasks_from_ui("BOTH"))
-        layout.addWidget(btn_add_both)
+        self.btn_add_both = PrimaryPushButton(FIF.ADD, "简繁")
+        self.btn_add_both.clicked.connect(lambda: self._add_tasks_from_ui("BOTH"))
+        layout.addWidget(self.btn_add_both)
+        
+        self.btn_add_no_sub = PrimaryPushButton(FIF.ADD, "添加任务")
+        self.btn_add_no_sub.clicked.connect(lambda: self._add_tasks_from_ui("NO_SUB"))
+        layout.addWidget(self.btn_add_no_sub)
+        self.btn_add_no_sub.hide()
+        
         return card
 
     def _create_queue_panel(self) -> CardWidget:
@@ -1496,6 +1691,91 @@ class EncodeManager(QMainWindow):
         self.lbl_pass2.setVisible(is_2pass)
         self.text_params_pass2.setVisible(is_2pass)
 
+    def _on_subtitle_mode_changed(self, route_key: str):
+        if not self.current_profile_name: return
+        
+        profile = self.profiles[self.current_profile_name]
+        old_has_subtitle = profile.get("has_subtitle_mode", True)
+        
+        if old_has_subtitle:
+            profile.update({
+                "source_dir_with_sub": self.entry_source_dir.text(),
+                "output_dir_with_sub": self.entry_output_dir.text(),
+            })
+        else:
+            profile.update({
+                "source_dir_no_sub": self.entry_source_dir.text(),
+                "output_dir_no_sub": self.entry_output_dir.text(),
+            })
+        
+        profile.update({
+            "sub_dir": self.entry_sub_dir.text(),
+            "sub_sc": self.entry_sub_sc.text(),
+            "sub_tc": self.entry_sub_tc.text(),
+            "out_sc": self.entry_out_sc.text(),
+            "out_tc": self.entry_out_tc.text(),
+            "last_ep": self.entry_ep.text(),
+            "source_no_sub": self.entry_source_no_sub.text(),
+            "out_no_sub": self.entry_out_no_sub.text(),
+            "last_ep_no_sub": self.entry_ep_no_sub.text(),
+        })
+        
+        new_has_subtitle = (route_key == "with_sub")
+        profile["has_subtitle_mode"] = new_has_subtitle
+        self._save_profiles_to_disk()
+        
+        self._update_subtitle_mode_ui(new_has_subtitle)
+        
+        if new_has_subtitle:
+            self.entry_source_dir.setText(profile.get("source_dir_with_sub", profile.get("source_dir", "")))
+            self.entry_output_dir.setText(profile.get("output_dir_with_sub", profile.get("output_dir", "")))
+            self.entry_sub_dir.setText(profile.get("sub_dir", ""))
+            self.entry_sub_sc.setText(profile.get("sub_sc", ""))
+            self.entry_sub_tc.setText(profile.get("sub_tc", ""))
+            self.entry_out_sc.setText(profile.get("out_sc", ""))
+            self.entry_out_tc.setText(profile.get("out_tc", ""))
+            self.entry_ep.setText(profile.get("last_ep", "01"))
+        else:
+            self.entry_source_dir.setText(profile.get("source_dir_no_sub", profile.get("source_dir", "")))
+            self.entry_output_dir.setText(profile.get("output_dir_no_sub", profile.get("output_dir", "")))
+            self.entry_source_no_sub.setText(profile.get("source_no_sub", ""))
+            self.entry_out_no_sub.setText(profile.get("out_no_sub", ""))
+            self.entry_ep_no_sub.setText(profile.get("last_ep_no_sub", "01"))
+
+    def _update_subtitle_mode_ui(self, has_subtitle: bool):
+        if has_subtitle:
+            self.label_source_no_sub.hide()
+            self.entry_source_no_sub.hide()
+            self.label_sub_dir.show()
+            self.entry_sub_dir.show()
+            self.btn_sub_dir.show()
+            self.template_group.show()
+            self.no_sub_group.hide()
+            
+            self.entry_ep.show()
+            self.entry_ep_no_sub.hide()
+            
+            self.btn_add_sc.show()
+            self.btn_add_tc.show()
+            self.btn_add_both.show()
+            self.btn_add_no_sub.hide()
+        else:
+            self.label_source_no_sub.show()
+            self.entry_source_no_sub.show()
+            self.label_sub_dir.hide()
+            self.entry_sub_dir.hide()
+            self.btn_sub_dir.hide()
+            self.template_group.hide()
+            self.no_sub_group.show()
+            
+            self.entry_ep.hide()
+            self.entry_ep_no_sub.show()
+            
+            self.btn_add_sc.hide()
+            self.btn_add_tc.hide()
+            self.btn_add_both.hide()
+            self.btn_add_no_sub.show()
+
     def _browse_folder(self, line_edit: PlainLineEdit):
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
         if folder: line_edit.setText(folder.replace("/", "\\"))
@@ -1564,18 +1844,34 @@ class EncodeManager(QMainWindow):
         if not self.current_profile_name: return
         
         profile = self.profiles[self.current_profile_name]
+        has_subtitle = profile.get("has_subtitle_mode", True)
+        
+        if has_subtitle:
+            profile.update({
+                "source_dir_with_sub": self.entry_source_dir.text(),
+                "output_dir_with_sub": self.entry_output_dir.text(),
+            })
+        else:
+            profile.update({
+                "source_dir_no_sub": self.entry_source_dir.text(),
+                "output_dir_no_sub": self.entry_output_dir.text(),
+            })
+        
+        profile["source_temp"] = self.entry_source_template.text()
+        
         profile.update({
-            # 压制配置
-            "source_dir": self.entry_source_dir.text(),
             "sub_dir": self.entry_sub_dir.text(),
-            "output_dir": self.entry_output_dir.text(),
-            "source_temp": self.entry_source_template.text(),
             "sub_sc": self.entry_sub_sc.text(),
             "sub_tc": self.entry_sub_tc.text(),
             "out_sc": self.entry_out_sc.text(),
             "out_tc": self.entry_out_tc.text(),
             "last_ep": self.entry_ep.text(),
-            # 封装配置
+            "source_no_sub": self.entry_source_no_sub.text(),
+            "out_no_sub": self.entry_out_no_sub.text(),
+            "last_ep_no_sub": self.entry_ep_no_sub.text(),
+        })
+        
+        profile.update({
             "extract_source_dir": self.extract_source_dir.text(),
             "extract_source_name": self.extract_source_name.text(),
             "extract_output_dir": self.extract_output_dir.text(),
@@ -1629,6 +1925,9 @@ class EncodeManager(QMainWindow):
             "selected_hw": "CPU",
             "selected_codec": "X264",
             "last_ep": "01",
+            "last_ep_no_sub": "01",
+            "has_subtitle_mode": True,
+            "out_no_sub": "",
             # 封装配置
             "extract_source_dir": "", "extract_source_name": "",
             "extract_output_dir": "", "extract_output_name": "",
@@ -1696,18 +1995,30 @@ class EncodeManager(QMainWindow):
         
         self._block_signals(True)
         
-        # 压制配置
-        self.entry_source_dir.setText(data.get("source_dir", ""))
-        self.entry_sub_dir.setText(data.get("sub_dir", ""))
-        self.entry_output_dir.setText(data.get("output_dir", ""))
+        has_subtitle = data.get("has_subtitle_mode", True)
+        self._update_subtitle_mode_ui(has_subtitle)
+        
+        if has_subtitle:
+            self.entry_source_dir.setText(data.get("source_dir_with_sub", data.get("source_dir", "")))
+            self.entry_output_dir.setText(data.get("output_dir_with_sub", data.get("output_dir", "")))
+        else:
+            self.entry_source_dir.setText(data.get("source_dir_no_sub", data.get("source_dir", "")))
+            self.entry_output_dir.setText(data.get("output_dir_no_sub", data.get("output_dir", "")))
         self.entry_source_template.setText(data.get("source_temp", ""))
+        
+        self.entry_sub_dir.setText(data.get("sub_dir", ""))
         self.entry_sub_sc.setText(data.get("sub_sc", ""))
         self.entry_sub_tc.setText(data.get("sub_tc", ""))
         self.entry_out_sc.setText(data.get("out_sc", ""))
         self.entry_out_tc.setText(data.get("out_tc", ""))
         self.entry_ep.setText(data.get("last_ep", "01"))
         
-        # 封装配置
+        self.entry_source_no_sub.setText(data.get("source_no_sub", ""))
+        self.entry_out_no_sub.setText(data.get("out_no_sub", ""))
+        self.entry_ep_no_sub.setText(data.get("last_ep_no_sub", "01"))
+        
+        self.seg_subtitle_mode.setCurrentItem("with_sub" if has_subtitle else "no_sub")
+        
         self.extract_source_dir.setText(data.get("extract_source_dir", ""))
         self.extract_source_name.setText(data.get("extract_source_name", ""))
         self.extract_output_dir.setText(data.get("extract_output_dir", ""))
@@ -1761,9 +2072,11 @@ class EncodeManager(QMainWindow):
 
     def _block_signals(self, block: bool):
         widgets = [
+            self.seg_subtitle_mode,
             self.entry_source_dir, self.entry_sub_dir, self.entry_output_dir,
             self.entry_source_template, self.entry_sub_sc, self.entry_sub_tc,
-            self.entry_out_sc, self.entry_out_tc, self.entry_ep,
+            self.entry_out_sc, self.entry_out_tc, self.entry_ep, self.entry_ep_no_sub,
+            self.entry_source_no_sub, self.entry_out_no_sub,
             self.text_params_crf, self.text_params_pass1, self.text_params_pass2,
             self.chk_2pass,
             self.extract_source_dir, self.extract_source_name, self.extract_output_dir,
@@ -1793,7 +2106,10 @@ class EncodeManager(QMainWindow):
         self.entry_sub_tc.clear()
         self.entry_out_sc.clear()
         self.entry_out_tc.clear()
+        self.entry_source_no_sub.clear()
+        self.entry_out_no_sub.clear()
         self.entry_ep.clear()
+        self.entry_ep_no_sub.clear()
         self.text_params_crf.clear()
         self.text_params_pass1.clear()
         self.text_params_pass2.clear()
@@ -1810,7 +2126,6 @@ class EncodeManager(QMainWindow):
                 if "param_matrix" not in pdata:
                     new_matrix = copy.deepcopy(DEFAULT_PARAMS_TEMPLATE)
                     if "params_crf" in pdata:
-                        # 迁移旧数据
                         new_matrix["CPU"]["X264"] = {
                             "crf": pdata.get("params_crf", ""),
                             "pass1": pdata.get("params_pass1", ""),
@@ -1821,11 +2136,17 @@ class EncodeManager(QMainWindow):
                     pdata["selected_hw"] = "CPU"
                     pdata["selected_codec"] = "X264"
                 else:
-                    # 确保现有 matrix 结构包含 enable_2pass
                     for hw in pdata["param_matrix"]:
                         for codec in pdata["param_matrix"][hw]:
                             if "enable_2pass" not in pdata["param_matrix"][hw][codec]:
                                 pdata["param_matrix"][hw][codec]["enable_2pass"] = False
+                
+                if "has_subtitle_mode" not in pdata:
+                    pdata["has_subtitle_mode"] = True
+                if "last_ep_no_sub" not in pdata:
+                    pdata["last_ep_no_sub"] = pdata.get("last_ep", "01")
+                if "out_no_sub" not in pdata:
+                    pdata["out_no_sub"] = ""
 
             self._refresh_profile_list()
             if self.profiles: self._select_profile(list(self.profiles.keys())[0])
@@ -1852,16 +2173,36 @@ class EncodeManager(QMainWindow):
         center = self.geometry().center()
         popup.move(center.x() - popup.width() // 2, center.y() - popup.height() // 2)
 
-    # [新增] 批量回调
     def _batch_add_callback(self, ep_list, mode, suffix):
         if not ep_list: return
         for ep in ep_list:
             self._add_task_internal(ep, mode, suffix)
         self.queue_list.scrollToBottom()
+        
+        if mode == "NO_SUB" and not self.app_settings.get("ep_not_shared", False):
+            if ep_list:
+                last_ep = ep_list[-1]
+                try:
+                    next_ep = str(int(last_ep) + 1).zfill(len(last_ep))
+                    self.entry_ep_no_sub.setText(next_ep)
+                    self.entry_ep.setText(next_ep)
+                except ValueError: pass
+        elif mode != "NO_SUB" and not self.app_settings.get("ep_not_shared", False):
+            if ep_list:
+                last_ep = ep_list[-1]
+                try:
+                    next_ep = str(int(last_ep) + 1).zfill(len(last_ep))
+                    self.entry_ep.setText(next_ep)
+                    self.entry_ep_no_sub.setText(next_ep)
+                except ValueError: pass
 
     def _add_tasks_from_ui(self, mode: str):
         """UI 按钮触发的单集添加"""
-        ep = self.entry_ep.text().strip()
+        if mode == "NO_SUB":
+            ep = self.entry_ep_no_sub.text().strip()
+        else:
+            ep = self.entry_ep.text().strip()
+        
         if not ep:
             InfoBar.warning(title="警告", content="请输入集数", parent=self)
             return
@@ -1880,13 +2221,15 @@ class EncodeManager(QMainWindow):
         profile = copy.deepcopy(self.profiles[self.current_profile_name])
         
         tasks = []
-        if mode in ["SC", "BOTH"]: tasks.append({"type": "SC", "ep": ep, "profile": profile, "suffix": suffix_text})
-        if mode in ["TC", "BOTH"]: tasks.append({"type": "TC", "ep": ep, "profile": profile, "suffix": suffix_text})
+        if mode == "NO_SUB":
+            tasks.append({"type": "NO_SUB", "ep": ep, "profile": profile, "suffix": suffix_text})
+        else:
+            if mode in ["SC", "BOTH"]: tasks.append({"type": "SC", "ep": ep, "profile": profile, "suffix": suffix_text})
+            if mode in ["TC", "BOTH"]: tasks.append({"type": "TC", "ep": ep, "profile": profile, "suffix": suffix_text})
         
         for task in tasks:
             display_suffix = f" {task['suffix']}" if task['suffix'] else ""
             
-            # 这里的 2-Pass 状态从选定的 HW/Codec matrix 中获取，而不是全局
             hw = profile.get("selected_hw", "CPU")
             codec = profile.get("selected_codec", "X264")
             p_matrix = profile.get("param_matrix", DEFAULT_PARAMS_TEMPLATE)
@@ -2016,47 +2359,96 @@ class EncodeManager(QMainWindow):
         params_matrix = profile.get("param_matrix", DEFAULT_PARAMS_TEMPLATE)
         params_set = params_matrix.get(hw, {}).get(codec, {"crf": "", "pass1": "", "pass2": "", "enable_2pass": False})
         
-        src_template = profile['source_temp']
-        full_src = self._resolve_file_with_wildcard(profile['source_dir'], src_template, ep)
-        
-        if task_type == "SC":
+        if task_type == "NO_SUB":
+            src_template = profile.get('source_no_sub', '')
+            out_name = profile.get('out_no_sub', '').replace('<ep>', ep)
+            if not out_name:
+                out_name = f"output_{ep}.mp4"
+            full_sub = None
+            source_dir = profile.get('source_dir_no_sub', profile.get('source_dir', ''))
+            output_dir = profile.get('output_dir_no_sub', profile.get('output_dir', ''))
+        elif task_type == "SC":
+            src_template = profile['source_temp']
             sub_template = profile['sub_sc']
             out_name = profile['out_sc'].replace('<ep>', ep)
+            full_sub = self._resolve_file_with_wildcard(profile['sub_dir'], sub_template, ep)
+            source_dir = profile.get('source_dir_with_sub', profile.get('source_dir', ''))
+            output_dir = profile.get('output_dir_with_sub', profile.get('output_dir', ''))
         else:
+            src_template = profile['source_temp']
             sub_template = profile['sub_tc']
             out_name = profile['out_tc'].replace('<ep>', ep)
+            full_sub = self._resolve_file_with_wildcard(profile['sub_dir'], sub_template, ep)
+            source_dir = profile.get('source_dir_with_sub', profile.get('source_dir', ''))
+            output_dir = profile.get('output_dir_with_sub', profile.get('output_dir', ''))
         
-        full_sub = self._resolve_file_with_wildcard(profile['sub_dir'], sub_template, ep)
+        full_src = self._resolve_file_with_wildcard(source_dir, src_template, ep)
         
         if suffix:
             root, ext = os.path.splitext(out_name)
             out_name = f"{root}{suffix}{ext}"
         
-        full_out = os.path.join(profile['output_dir'], out_name)
+        full_out = os.path.join(output_dir, out_name)
         
-        if not full_src or not full_sub:
+        if not full_src:
             src_display = src_template.replace('<ep>', ep)
-            sub_display = sub_template.replace('<ep>', ep)
-            self._log_to_ui(f"❌ 文件缺失: {src_display} 或 {sub_display}")
+            self._log_to_ui(f"❌ 文件缺失: {src_display}")
             self._task_finished_callback(False, full_out, "0s")
             return
         
-        sub_name = os.path.basename(full_sub)
+        if task_type != "NO_SUB" and not full_sub:
+            sub_display = sub_template.replace('<ep>', ep)
+            self._log_to_ui(f"❌ 字幕文件缺失: {sub_display}")
+            self._task_finished_callback(False, full_out, "0s")
+            return
         
-        # [修改] 读取 matrix 中的 2-Pass 设置
+        sub_name = os.path.basename(full_sub) if full_sub else None
+        
         is_2pass = params_set.get("enable_2pass", False)
         
-        commands = self._build_ffmpeg_commands(
-            params_set, full_src, full_sub, sub_name, full_out, is_2pass, profile['sub_dir']
-        )
-        temp_files = self._get_temp_files(profile['sub_dir']) if is_2pass else []
+        if task_type == "NO_SUB":
+            commands = self._build_ffmpeg_commands_no_sub(params_set, full_src, full_out, is_2pass, output_dir)
+            temp_files = self._get_temp_files(output_dir) if is_2pass else []
+            work_dir = output_dir
+        else:
+            commands = self._build_ffmpeg_commands(
+                params_set, full_src, full_sub, sub_name, full_out, is_2pass, profile['sub_dir']
+            )
+            temp_files = self._get_temp_files(profile['sub_dir']) if is_2pass else []
+            work_dir = profile['sub_dir']
+        
         self.progress_dashboard.start_timer()
-        self.worker = Worker(commands, profile['sub_dir'], full_out, temp_files)
+        self.worker = Worker(commands, work_dir, full_out, temp_files)
         self.worker.log_signal.connect(self._log_to_ui)
         self.worker.progress_signal.connect(self._update_progress_text)
         self.worker.percent_signal.connect(self._update_progress_percent)
         self.worker.finished_signal.connect(self._task_finished_callback)
         self.worker.start()
+
+    def _build_ffmpeg_commands_no_sub(self, params_set: Dict, full_src: str, 
+                                       full_out: str, is_2pass: bool, work_dir: str) -> List[str]:
+        commands = []
+        if is_2pass:
+            params_1 = self._sanitize_params(params_set.get("pass1", ""))
+            params_2 = self._sanitize_params(params_set.get("pass2", ""))
+            has_pass1 = "-pass 1" in params_1 or "-pass=1" in params_1
+            has_pass2 = "-pass 2" in params_2 or "-pass=2" in params_2
+            has_passlog1 = "-passlogfile" in params_1
+            has_passlog2 = "-passlogfile" in params_2
+            pass_log_path = os.path.join(work_dir, "ffmpeg2pass")
+            pass1_prefix = "" if has_pass1 else "-pass 1 "
+            passlog1_prefix = "" if has_passlog1 else f'-passlogfile "{pass_log_path}" '
+            cmd1 = f'ffmpeg -y -i "{full_src}" {passlog1_prefix}{pass1_prefix}{params_1}'
+            commands.append(cmd1)
+            pass2_prefix = "" if has_pass2 else "-pass 2 "
+            passlog2_prefix = "" if has_passlog2 else f'-passlogfile "{pass_log_path}" '
+            cmd2 = f'ffmpeg -y -i "{full_src}" {passlog2_prefix}{pass2_prefix}{params_2} "{full_out}"'
+            commands.append(cmd2)
+        else:
+            params_crf = self._sanitize_params(params_set.get("crf", ""))
+            cmd = f'ffmpeg -y -i "{full_src}" {params_crf} "{full_out}"'
+            commands.append(cmd)
+        return commands
 
     def _build_ffmpeg_commands(self, params_set: Dict, full_src: str, 
                                full_sub: str, sub_name: str, full_out: str, is_2pass: bool, sub_dir: str) -> List[str]:
@@ -2164,11 +2556,16 @@ class EncodeManager(QMainWindow):
         self.progress_dashboard.update_data(text)
 
     def _update_progress_percent(self, percent: float, pass_idx: int):
-        if self.current_item:
-            widget = self.queue_list.itemWidget(self.current_item)
-            if isinstance(widget, TaskItemWidget):
-                # 更新进度条 (Running status_code=1)
+        try:
+            item = self.current_item
+            if item is None:
+                return
+            widget = self.queue_list.itemWidget(item)
+            if widget is not None and isinstance(widget, TaskItemWidget):
                 widget.set_status(progress=percent, pass_idx=pass_idx, status_code=1)
+        except RuntimeError:
+            # Widget 已被 C++ 侧销毁（wrapped C/C++ object has been deleted）
+            pass
 
     def _task_finished_callback(self, success: bool, output_file: str, duration: str):
         if self.force_stop_flag:
@@ -2178,21 +2575,22 @@ class EncodeManager(QMainWindow):
         data = self.current_item.data(Qt.ItemDataRole.UserRole)
         task_info = data['raw_task']
         
-        widget = self.queue_list.itemWidget(self.current_item)
+        try:
+            widget = self.queue_list.itemWidget(self.current_item)
+        except RuntimeError:
+            widget = None
         
         if success:
             data['status'] = 'done'
-            if isinstance(widget, TaskItemWidget):
-                # Done status_code=2
+            if widget is not None and isinstance(widget, TaskItemWidget):
                 widget.set_status(progress=1.0, status_code=2)
             
             if not task_info.get('suffix'):
                 self.completed_history.add((task_info['ep'], task_info['type']))
-                self._check_auto_increment(task_info['ep'])
+                self._check_auto_increment(task_info['ep'], task_info['type'])
         else:
             data['status'] = 'error'
-            if isinstance(widget, TaskItemWidget):
-                # Error status_code=3
+            if widget is not None and isinstance(widget, TaskItemWidget):
                 widget.set_status(progress=0.0, status_code=3)
                 
         self.current_item.setData(Qt.ItemDataRole.UserRole, data)
@@ -2201,17 +2599,33 @@ class EncodeManager(QMainWindow):
         self.progress_dashboard.reset()
         if self.is_running: self._process_next_task()
 
-    def _check_auto_increment(self, ep: str):
+    def _check_auto_increment(self, ep: str, task_type: str = None):
         if not self.app_settings.get("auto_ep_encode", True):
             return
-        if (ep, 'SC') in self.completed_history and (ep, 'TC') in self.completed_history:
-            self._log_to_ui(f"ℹ️ 集数 {ep} 双语完成，自动 +1")
-            current = self.entry_ep.text()
+        
+        ep_not_shared = self.app_settings.get("ep_not_shared", False)
+        
+        if task_type == "NO_SUB":
+            self._log_to_ui(f"ℹ️ 无字幕压制完成，集数自动 +1")
+            current = self.entry_ep_no_sub.text()
             if current == ep:
                 try:
                     next_ep = str(int(ep) + 1).zfill(len(ep))
-                    self.entry_ep.setText(next_ep)
+                    self.entry_ep_no_sub.setText(next_ep)
+                    if not ep_not_shared:
+                        self.entry_ep.setText(next_ep)
                 except ValueError: pass
+        else:
+            if (ep, 'SC') in self.completed_history and (ep, 'TC') in self.completed_history:
+                self._log_to_ui(f"ℹ️ 集数 {ep} 双语完成，自动 +1")
+                current = self.entry_ep.text()
+                if current == ep:
+                    try:
+                        next_ep = str(int(ep) + 1).zfill(len(ep))
+                        self.entry_ep.setText(next_ep)
+                        if not ep_not_shared:
+                            self.entry_ep_no_sub.setText(next_ep)
+                    except ValueError: pass
 
     def _all_tasks_finished(self):
         self.is_running = False
@@ -2241,9 +2655,10 @@ class EncodeManager(QMainWindow):
                 data = self.current_item.data(Qt.ItemDataRole.UserRole)
                 data['status'] = 'error'
                 widget = self.queue_list.itemWidget(self.current_item)
-                if isinstance(widget, TaskItemWidget):
+                if widget is not None and isinstance(widget, TaskItemWidget):
                     widget.set_status(progress=0.0, status_code=3) # Error color
-            except: pass
+            except (RuntimeError, AttributeError):
+                pass
         self.current_item = None
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -2801,9 +3216,13 @@ class EncodeManager(QMainWindow):
         self._mux_worker.start()
 
     def _on_extract_finished(self, success: bool, list_item: QListWidgetItem):
-        widget = self.mux_queue_list.itemWidget(list_item)
-        if isinstance(widget, TaskItemWidget):
-            widget.set_status(progress=1.0, status_code=2 if success else 3)
+        try:
+            if list_item is not None:
+                widget = self.mux_queue_list.itemWidget(list_item)
+                if widget is not None and isinstance(widget, TaskItemWidget):
+                    widget.set_status(progress=1.0, status_code=2 if success else 3)
+        except RuntimeError:
+            pass
         
         if success and self.app_settings.get("auto_ep_mux", True):
             ep = self.extract_ep.text().strip()
@@ -2835,9 +3254,13 @@ class EncodeManager(QMainWindow):
         self._subset_worker.start()
 
     def _on_subset_finished(self, success: bool, list_item: QListWidgetItem):
-        widget = self.mux_queue_list.itemWidget(list_item)
-        if isinstance(widget, TaskItemWidget):
-            widget.set_status(progress=1.0, status_code=2 if success else 3)
+        try:
+            if list_item is not None:
+                widget = self.mux_queue_list.itemWidget(list_item)
+                if widget is not None and isinstance(widget, TaskItemWidget):
+                    widget.set_status(progress=1.0, status_code=2 if success else 3)
+        except RuntimeError:
+            pass
         
         if success and self.app_settings.get("auto_ep_mux", True):
             ep = self.subset_ep.text().strip()
@@ -2924,9 +3347,13 @@ class EncodeManager(QMainWindow):
         self._mux_worker.start()
 
     def _on_mux_finished(self, success: bool, list_item: QListWidgetItem):
-        widget = self.mux_queue_list.itemWidget(list_item)
-        if isinstance(widget, TaskItemWidget):
-            widget.set_status(progress=1.0, status_code=2 if success else 3)
+        try:
+            if list_item is not None:
+                widget = self.mux_queue_list.itemWidget(list_item)
+                if widget is not None and isinstance(widget, TaskItemWidget):
+                    widget.set_status(progress=1.0, status_code=2 if success else 3)
+        except RuntimeError:
+            pass
         
         if success and self.app_settings.get("auto_ep_mux", True):
             ep = self.mux_ep.text().strip()
@@ -2994,6 +3421,23 @@ class EncodeManager(QMainWindow):
         self.app_settings["window_geometry"] = rect
         self._save_app_settings()
         
+        # 判断关闭行为
+        close_behavior = self.app_settings.get("close_behavior", "tray")
+        
+        if close_behavior == "tray" and not getattr(self, '_force_quit', False):
+            # 最小化到托盘
+            event.ignore()
+            self.hide()
+            self.tray_icon.show()
+            self.tray_icon.showMessage(
+                "smzase 压制工具",
+                "程序已最小化到系统托盘，双击图标可恢复窗口。",
+                QSystemTrayIcon.MessageIcon.Information,
+                2000
+            )
+            return
+        
+        # 关闭工具模式
         if self.is_running:
             reply = QMessageBox.question(
                 self, '退出', '任务运行中，确定强制退出？',
@@ -3001,11 +3445,15 @@ class EncodeManager(QMainWindow):
             )
             if reply == QMessageBox.StandardButton.Yes:
                 self._force_stop()
+                self.tray_icon.hide()
                 event.accept()
+                QApplication.quit()
             else: event.ignore()
         else:
             self._save_current_profile_meta()
+            self.tray_icon.hide()
             event.accept()
+            QApplication.quit()
 
 # ==================== 程序入口 ====================
 def main():
