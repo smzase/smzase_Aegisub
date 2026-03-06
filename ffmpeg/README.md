@@ -1,4 +1,4 @@
-### 关于自压工具---auto_encode_fluent.py
+### 关于自压工具 > auto_encode_fluent.py
 你要去安装
 ```
 pip install PyQt6 PyQt6-Fluent-Widgets PyQt6-Frameless-Window
