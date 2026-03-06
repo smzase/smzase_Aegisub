@@ -13,6 +13,7 @@ from typing import Optional, Dict, List, Any
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRect, QSize, QPoint
 from PyQt6.QtGui import QColor, QAction, QPalette, QPainter, QBrush, QLinearGradient, QPainterPath, QCursor
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QFileDialog, QFrame, QListWidgetItem, QAbstractItemView,
@@ -59,6 +60,69 @@ DEFAULT_TOOL_PATHS = {
     "mkvmerge_path": "",
     "assfontsubset_path": ""
 }
+
+# ==================== 单实例检测 ====================
+SINGLE_INSTANCE_KEY = "smzase_encode_single_instance_2024"
+
+class SingleInstance:
+    """Windows单实例检测类，使用互斥体"""
+    def __init__(self):
+        self.mutex = None
+        self._is_running = False
+        
+    def try_lock(self):
+        """尝试获取单实例锁，返回True表示是第一个实例"""
+        try:
+            self.mutex = windll.kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_KEY)
+            last_error = windll.kernel32.GetLastError()
+            if last_error == 183:
+                self._is_running = True
+                return False
+            self._is_running = False
+            return True
+        except Exception:
+            return True
+    
+    def is_running(self):
+        return self._is_running
+    
+    def release(self):
+        if self.mutex:
+            windll.kernel32.ReleaseMutex(self.mutex)
+            windll.kernel32.CloseHandle(self.mutex)
+            self.mutex = None
+
+class SingleInstanceServer:
+    """单实例服务端，用于接收其他实例的通知"""
+    def __init__(self, callback):
+        self.server = QLocalServer()
+        self.callback = callback
+        QLocalServer.removeServer(SINGLE_INSTANCE_KEY)
+        if self.server.listen(SINGLE_INSTANCE_KEY):
+            self.server.newConnection.connect(self._on_new_connection)
+    
+    def _on_new_connection(self):
+        socket = self.server.nextPendingConnection()
+        if socket:
+            socket.waitForReadyRead(1000)
+            data = socket.readAll().data()
+            if data == b"SHOW_WINDOW":
+                self.callback()
+            socket.disconnectFromServer()
+    
+    def close(self):
+        self.server.close()
+
+def notify_existing_instance():
+    """通知已存在的实例显示窗口"""
+    socket = QLocalSocket()
+    socket.connectToServer(SINGLE_INSTANCE_KEY)
+    if socket.waitForConnected(1000):
+        socket.write(b"SHOW_WINDOW")
+        socket.waitForBytesWritten(1000)
+        socket.disconnectFromServer()
+        return True
+    return False
 
 # ==================== 自定义控件 ====================
 class PlainLineEdit(LineEdit):
@@ -1036,6 +1100,9 @@ class EncodeManager(QMainWindow):
         
         # 初始化系统托盘
         self._init_tray_icon()
+        
+        # 初始化单实例服务端
+        self._single_instance_server = SingleInstanceServer(self._tray_show_window)
         
         self._load_profiles()
 
@@ -3446,21 +3513,36 @@ class EncodeManager(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 self._force_stop()
                 self.tray_icon.hide()
+                if hasattr(self, '_single_instance_server'):
+                    self._single_instance_server.close()
                 event.accept()
                 QApplication.quit()
             else: event.ignore()
         else:
             self._save_current_profile_meta()
             self.tray_icon.hide()
+            if hasattr(self, '_single_instance_server'):
+                self._single_instance_server.close()
             event.accept()
             QApplication.quit()
 
 # ==================== 程序入口 ====================
 def main():
+    single_instance = SingleInstance()
+    
+    if not single_instance.try_lock():
+        if notify_existing_instance():
+            sys.exit(0)
+        else:
+            sys.exit(0)
+    
     app = QApplication(sys.argv)
     window = EncodeManager()
+    window._single_instance = single_instance
     window.show()
-    sys.exit(app.exec())
+    result = app.exec()
+    single_instance.release()
+    sys.exit(result)
 
 if __name__ == "__main__":
     main()
