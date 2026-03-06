@@ -15,3 +15,8 @@ pip install "PyQt-Fluent-Widgets[full]" -i https://pypi.org/simple/
 ```
 pip uninstall PyQt5 PyQt5-Qt5 PyQt5-sip PyQt5-Frameless-Window PyQt-Fluent-Widgets -y
 ```
+
+打包命令
+```
+python -m nuitka --standalone --onefile --windows-disable-console --enable-plugin=pyqt6 --enable-plugin=numpy --windows-icon-from-ico=konoha.ico --include-data-file=konoha.ico=konoha.ico auto_encode_fluent.py
+```
