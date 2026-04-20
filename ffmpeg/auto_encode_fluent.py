@@ -7,11 +7,13 @@ import time
 import glob
 import copy
 import ctypes
+import logging
+import traceback
 from ctypes import windll, byref, c_int, sizeof
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRect, QSize, QPoint
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRect, QSize, QPoint, qInstallMessageHandler
 from PyQt6.QtGui import QColor, QAction, QPalette, QPainter, QBrush, QLinearGradient, QPainterPath, QCursor
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
@@ -60,6 +62,49 @@ DEFAULT_TOOL_PATHS = {
     "mkvmerge_path": "",
     "assfontsubset_path": ""
 }
+
+# ==================== 日志系统 ====================
+def setup_logger(config_dir: str, log_dir_name: str = "log") -> logging.Logger:
+    """初始化日志系统，返回logger对象"""
+    log_dir = os.path.join(config_dir, log_dir_name)
+    if not os.path.exists(log_dir):
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except Exception:
+            pass
+    
+    log_file = os.path.join(log_dir, f"encode_{datetime.now().strftime('%Y%m%d')}.log")
+    
+    logger = logging.getLogger("EncodeManager")
+    logger.setLevel(logging.DEBUG)
+    
+    if logger.handlers:
+        return logger
+    
+    try:
+        file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='a')
+        file_handler.setLevel(logging.DEBUG)
+        
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        
+        formatter = logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+    except Exception:
+        pass
+    
+    return logger
+
+def get_logger() -> logging.Logger:
+    """获取logger对象"""
+    return logging.getLogger("EncodeManager")
 
 # ==================== 单实例检测 ====================
 SINGLE_INSTANCE_KEY = "smzase_encode_single_instance_2024"
@@ -804,9 +849,13 @@ class Worker(QThread):
         self.last_update_time = 0
         self.start_time = 0
         self.total_duration_sec = 0.0
+        self.logger = get_logger()
 
     def run(self):
         self.start_time = time.time()
+        self.logger.info(f"[Worker] 开始压制任务 - 输出文件: {self.output_file}")
+        self.logger.info(f"[Worker] 工作目录: {self.work_dir}")
+        self.logger.debug(f"[Worker] 命令列表: {self.commands}")
         self.log_signal.emit(f"Working Directory: {self.work_dir}")
         
         total_steps = len(self.commands)
@@ -818,15 +867,18 @@ class Worker(QThread):
             if total_steps > 1:
                 step_num = index + 1 # 1 for Pass 1, 2 for Pass 2
                 step_name = 'Pass 1' if index == 0 else 'Pass 2'
+                self.logger.info(f"[Worker] 执行步骤 {index + 1}/{total_steps}: {step_name}")
                 self.log_signal.emit(f"🔄 正在执行 [Step {index + 1}/{total_steps}]: {step_name}")
             else:
                 step_num = 2 # treat single pass as "final" pass for color purpose (Green)
             
+            self.logger.debug(f"[Worker] 执行命令: {cmd}")
             self.log_signal.emit(f"Executing: {cmd}")
             
             if not self._execute_command(cmd, step_num):
                 self._cleanup()
                 duration = self._get_duration_str()
+                self.logger.error(f"[Worker] 压制失败 - 输出文件: {self.output_file}, 耗时: {duration}")
                 self.finished_signal.emit(False, self.output_file, duration)
                 return
 
@@ -834,9 +886,11 @@ class Worker(QThread):
         duration = self._get_duration_str()
         
         if self.is_killed:
+            self.logger.warning(f"[Worker] 任务被用户终止 - 输出文件: {self.output_file}, 耗时: {duration}")
             self.log_signal.emit("🔴 [用户操作] 进程已强制终止")
             self.finished_signal.emit(False, self.output_file, duration)
         else:
+            self.logger.info(f"[Worker] 压制完成 - 输出文件: {self.output_file}, 耗时: {duration}")
             self.log_signal.emit(f"🟢 [完成] FFmpeg 进程成功退出，耗时: {duration}")
             self.finished_signal.emit(True, self.output_file, duration)
 
@@ -861,7 +915,6 @@ class Worker(QThread):
                 encoding='utf-8', errors='replace', text=True, bufsize=1
             )
             
-            # 重置当前命令的时长解析
             self.total_duration_sec = 0.0
             
             while True:
@@ -869,14 +922,13 @@ class Worker(QThread):
                 try:
                     line = self.process.stdout.readline()
                 except (OSError, ValueError):
-                    # 管道已关闭或进程已终止
                     break
                 if not line and self.process.poll() is not None: break
                 if line:
                     try:
                         self._process_output_line(line.strip(), pass_index)
-                    except Exception:
-                        pass  # 防止解析异常输出时崩溃
+                    except Exception as e:
+                        self.logger.debug(f"[Worker] 解析输出行异常: {e}")
 
             try:
                 return_code = self.process.poll()
@@ -884,9 +936,11 @@ class Worker(QThread):
                 return False
             if self.is_killed: return False
             if return_code == 0: return True
+            self.logger.error(f"[Worker] FFmpeg 异常退出，代码: {return_code}")
             self.log_signal.emit(f"🔴 [错误] FFmpeg 异常退出，代码 {return_code}")
             return False
         except Exception as e:
+            self.logger.error(f"[Worker] 无法启动进程: {str(e)}\n{traceback.format_exc()}")
             self.log_signal.emit(f"🔴 [系统异常] 无法启动进程: {str(e)}")
             return False
 
@@ -937,15 +991,20 @@ class MKVExtractWorker(QThread):
         self.work_dir = work_dir
         self.process: Optional[subprocess.Popen] = None
         self.is_killed = False
+        self.logger = get_logger()
 
     def run(self):
+        self.logger.info(f"[MKVExtract] 开始MKV提取 - 工作目录: {self.work_dir}")
+        self.logger.debug(f"[MKVExtract] 命令: {self.command}")
         self.log_signal.emit(f"Working Directory: {self.work_dir}")
         self.log_signal.emit(f"Executing: {self.command}")
         
         if not self._execute_command():
+            self.logger.error(f"[MKVExtract] MKV提取失败")
             self.finished_signal.emit(False, "MKV 提取失败")
             return
         
+        self.logger.info(f"[MKVExtract] MKV提取完成")
         self.log_signal.emit("🟢 MKV 提取完成")
         self.finished_signal.emit(True, "MKV 提取成功")
 
@@ -965,9 +1024,14 @@ class MKVExtractWorker(QThread):
                 if line: self.log_signal.emit(line.strip())
 
             return_code = self.process.poll()
-            if self.is_killed: return False
+            if self.is_killed:
+                self.logger.warning(f"[MKVExtract] 任务被用户终止")
+                return False
+            if return_code != 0:
+                self.logger.error(f"[MKVExtract] 进程异常退出，代码: {return_code}")
             return return_code == 0
         except Exception as e:
+            self.logger.error(f"[MKVExtract] 系统异常: {str(e)}\n{traceback.format_exc()}")
             self.log_signal.emit(f"🔴 [系统异常] {str(e)}")
             return False
 
@@ -990,30 +1054,34 @@ class FontSubsetWorker(QThread):
         self.font_dir = font_dir
         self.process: Optional[subprocess.Popen] = None
         self.is_killed = False
+        self.logger = get_logger()
 
     def run(self):
+        self.logger.info(f"[FontSubset] 开始字体子集化 - 字幕目录: {self.subtitle_dir}")
+        self.logger.info(f"[FontSubset] 字体目录: {self.font_dir}")
         self.log_signal.emit(f"字幕目录: {self.subtitle_dir}")
         self.log_signal.emit(f"字体目录: {self.font_dir}")
         
         if not self._execute_command():
+            self.logger.error(f"[FontSubset] 字体子集化失败")
             self.finished_signal.emit(False, "字体子集化失败")
             return
         
+        self.logger.info(f"[FontSubset] 字体子集化完成")
         self.log_signal.emit("🟢 字体子集化完成")
         self.finished_signal.emit(True, "字体子集化成功")
 
     def _execute_command(self) -> bool:
         try:
-            # 获取所有 .ass 文件
             ass_files = glob.glob(os.path.join(self.subtitle_dir, "*.ass"))
             
             if not ass_files:
+                self.logger.warning(f"[FontSubset] 未找到 .ass 文件")
                 self.log_signal.emit("⚠️ 未找到 .ass 文件")
                 return False
             
-            # 构建命令：AssFontSubset.Console.exe <所有ass文件> --fonts <字体目录>
             cmd = [self.assfontsubset_path] + ass_files + ["--fonts", self.font_dir]
-            
+            self.logger.debug(f"[FontSubset] 处理 {len(ass_files)} 个字幕文件")
             self.log_signal.emit(f"处理 {len(ass_files)} 个字幕文件...")
             
             self.process = subprocess.Popen(
@@ -1025,6 +1093,7 @@ class FontSubsetWorker(QThread):
             
             while True:
                 if self.is_killed:
+                    self.logger.warning(f"[FontSubset] 任务被用户终止")
                     self.process.terminate()
                     return False
                 line = self.process.stdout.readline()
@@ -1035,11 +1104,13 @@ class FontSubsetWorker(QThread):
             
             return_code = self.process.poll()
             if return_code != 0:
+                self.logger.error(f"[FontSubset] 处理失败，返回码: {return_code}")
                 self.log_signal.emit(f"⚠️ 处理失败，返回码: {return_code}")
                 return False
             
             return True
         except Exception as e:
+            self.logger.error(f"[FontSubset] 系统异常: {str(e)}\n{traceback.format_exc()}")
             self.log_signal.emit(f"🔴 [系统异常] {str(e)}")
             return False
 
@@ -1075,6 +1146,12 @@ class EncodeManager(QMainWindow):
         self.config_dir = self._get_config_dir()
         self.profile_file = os.path.join(self.config_dir, "profiles.json")
         self.app_settings_file = os.path.join(self.config_dir, "app_settings.json")
+        
+        self.logger = setup_logger(self.config_dir)
+        self.logger.info("=" * 50)
+        self.logger.info("应用程序启动")
+        self.logger.info(f"配置目录: {self.config_dir}")
+        
         self._save_app_settings()
         self._restore_window_geometry()
         
@@ -2426,6 +2503,8 @@ class EncodeManager(QMainWindow):
         params_matrix = profile.get("param_matrix", DEFAULT_PARAMS_TEMPLATE)
         params_set = params_matrix.get(hw, {}).get(codec, {"crf": "", "pass1": "", "pass2": "", "enable_2pass": False})
         
+        self.logger.info(f"[EncodeManager] 开始压制任务 - 集数: {ep}, 类型: {task_type}, 硬件: {hw}, 编码: {codec}")
+        
         if task_type == "NO_SUB":
             src_template = profile.get('source_no_sub', '')
             out_name = profile.get('out_no_sub', '').replace('<ep>', ep)
@@ -2635,6 +2714,8 @@ class EncodeManager(QMainWindow):
             pass
 
     def _task_finished_callback(self, success: bool, output_file: str, duration: str):
+        self.logger.info(f"[EncodeManager] 任务完成回调 - 成功: {success}, 输出文件: {output_file}, 耗时: {duration}")
+        
         if self.force_stop_flag:
             self._handle_forced_cleanup(output_file)
             return
@@ -2649,6 +2730,7 @@ class EncodeManager(QMainWindow):
         
         if success:
             data['status'] = 'done'
+            self.logger.info(f"[EncodeManager] 任务成功 - 集数: {task_info['ep']}, 类型: {task_info['type']}")
             if widget is not None and isinstance(widget, TaskItemWidget):
                 widget.set_status(progress=1.0, status_code=2)
             
@@ -2657,6 +2739,7 @@ class EncodeManager(QMainWindow):
                 self._check_auto_increment(task_info['ep'], task_info['type'])
         else:
             data['status'] = 'error'
+            self.logger.error(f"[EncodeManager] 任务失败 - 集数: {task_info['ep']}, 类型: {task_info['type']}")
             if widget is not None and isinstance(widget, TaskItemWidget):
                 widget.set_status(progress=0.0, status_code=3)
                 
@@ -2695,6 +2778,7 @@ class EncodeManager(QMainWindow):
                     except ValueError: pass
 
     def _all_tasks_finished(self):
+        self.logger.info("[EncodeManager] 所有队列任务完成")
         self.is_running = False
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -2703,6 +2787,7 @@ class EncodeManager(QMainWindow):
         InfoBar.success(title="完成", content="所有任务已结束", parent=self)
 
     def _force_stop(self):
+        self.logger.warning("[EncodeManager] 用户请求强制停止")
         self._hide_stop_confirm()
         if self.worker and self.is_running:
             self._log_to_ui("⚠️ 正在强制终止进程...")
@@ -3483,16 +3568,16 @@ class EncodeManager(QMainWindow):
         self._do_mux_task(ep, profile, None)
 
     def closeEvent(self, event):
-        # 保存窗口几何信息
+        self.logger.info("[EncodeManager] 触发关闭事件")
+        
         rect = self.geometry().getRect()
         self.app_settings["window_geometry"] = rect
         self._save_app_settings()
         
-        # 判断关闭行为
         close_behavior = self.app_settings.get("close_behavior", "tray")
         
         if close_behavior == "tray" and not getattr(self, '_force_quit', False):
-            # 最小化到托盘
+            self.logger.info("[EncodeManager] 最小化到系统托盘")
             event.ignore()
             self.hide()
             self.tray_icon.show()
@@ -3504,17 +3589,18 @@ class EncodeManager(QMainWindow):
             )
             return
         
-        # 关闭工具模式
         if self.is_running:
             reply = QMessageBox.question(
                 self, '退出', '任务运行中，确定强制退出？',
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
+                self.logger.info("[EncodeManager] 用户确认强制退出，任务运行中")
                 self._force_stop()
                 self.tray_icon.hide()
                 if hasattr(self, '_single_instance_server'):
                     self._single_instance_server.close()
+                self.logger.info("[EncodeManager] 应用程序退出")
                 event.accept()
                 QApplication.quit()
             else: event.ignore()
@@ -3523,11 +3609,34 @@ class EncodeManager(QMainWindow):
             self.tray_icon.hide()
             if hasattr(self, '_single_instance_server'):
                 self._single_instance_server.close()
+            self.logger.info("[EncodeManager] 应用程序正常退出")
             event.accept()
             QApplication.quit()
 
 # ==================== 程序入口 ====================
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    """全局异常处理器，捕获未处理的异常并记录到日志"""
+    logger = get_logger()
+    error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    logger.critical(f"未捕获的异常导致程序崩溃:\n{error_msg}")
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+def qt_message_handler(mode, context, message):
+    """Qt 消息处理器，捕获 Qt 内部消息"""
+    logger = get_logger()
+    if mode == 0:
+        logger.debug(f"[Qt] {message}")
+    elif mode == 1:
+        logger.warning(f"[Qt Warning] {message}")
+    elif mode == 2:
+        logger.error(f"[Qt Critical] {message}")
+    elif mode == 3:
+        logger.critical(f"[Qt Fatal] {message}")
+
 def main():
+    sys.excepthook = global_exception_handler
+    qInstallMessageHandler(qt_message_handler)
+    
     single_instance = SingleInstance()
     
     if not single_instance.try_lock():
