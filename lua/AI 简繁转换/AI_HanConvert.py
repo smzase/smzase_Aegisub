@@ -16,6 +16,367 @@ def write_crash_log(msg):
     except:
         pass
 
+# ================= 独立差异比较窗口 (VS Code 风格) =================
+def _ms_to_ass_time(ms):
+    """毫秒转 ASS 时间格式 H:MM:SS.cc"""
+    ms = int(ms or 0)
+    h = ms // 3600000
+    m = (ms % 3600000) // 60000
+    s = (ms % 60000) // 1000
+    cs = (ms % 1000) // 10
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+def _format_ass_line(meta, text):
+    """根据 ASS 元数据构造完整字幕行"""
+    if not meta:
+        return text
+    cls = 'Comment' if meta.get('class') == 'comment' else 'Dialogue'
+    return "%s: %s,%s,%s,%s,%s,%s,%s,%s,%s,%s" % (
+        cls,
+        meta.get('layer', 0),
+        _ms_to_ass_time(meta.get('start_time', 0)),
+        _ms_to_ass_time(meta.get('end_time', 0)),
+        meta.get('style', ''),
+        meta.get('actor', ''),
+        meta.get('margin_l', 0),
+        meta.get('margin_r', 0),
+        meta.get('margin_v', 0),
+        meta.get('effect', ''),
+        text,
+    )
+
+def show_diff_window(original_texts, converted_texts):
+    """VS Code 风格差异比较窗口：深色主题 + 缩略图 + 非阻塞"""
+    try:
+        import tkinter as tk
+        from tkinter import ttk, font as tkfont
+        import difflib
+    except ImportError:
+        print("tkinter 不可用")
+        return
+
+    # VS Code Dark Theme
+    C_BG = '#1e1e1e'
+    C_HEADER = '#2d2d2d'
+    C_LINENO = '#1a1a1a'
+    C_FG = '#d4d4d4'
+    C_FG_LINENO = '#858585'
+    C_DIFF_L = '#4a2d2d'
+    C_DIFF_R = '#2d4a2d'
+    C_CHAR_L = '#804040'
+    C_CHAR_R = '#3c7050'
+    C_ACCENT = '#0e639c'
+    C_MINIMAP_BG = '#1a1a1a'
+    C_MINIMAP_SAME = '#2a2a2a'
+    C_VIEWPORT = '#4a9eff'
+    MINIMAP_W = 80
+
+    root = tk.Tk()
+    root.title("繁化对比 - Diff Viewer")
+    root.geometry("1500x850")
+    root.minsize(800, 400)
+    root.configure(bg=C_BG)
+    root.lift()
+    root.attributes('-topmost', True)
+    root.after(100, lambda: root.attributes('-topmost', False))
+
+    # 深色滚动条样式 (clam 主题支持自定义颜色)
+    _style = ttk.Style()
+    _style.theme_use('clam')
+    _style.configure('Dark.Horizontal.TScrollbar',
+                     background=C_BG, troughcolor=C_BG,
+                     arrowcolor=C_FG, bordercolor=C_BG,
+                     lightcolor=C_BG, darkcolor=C_BG,
+                     gripcount=0)
+
+    # 字体：系统默认字体（微软雅黑，避免等宽字体回退到宋体）
+    available = set(tkfont.families())
+    text_family = 'Microsoft YaHei UI'
+    for f in ['Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', 'Tahoma']:
+        if f in available:
+            text_family = f
+            break
+    mono = tkfont.Font(family=text_family, size=11)
+    ui_font = tkfont.Font(family='Segoe UI', size=10)
+    hdr_font = tkfont.Font(family='Segoe UI', size=11, weight='bold')
+
+    total = max(len(original_texts), len(converted_texts))
+    diff_count = sum(1 for o, c in zip(original_texts, converted_texts) if o != c)
+
+    # === 顶部标题栏 ===
+    hdr = tk.Frame(root, bg=C_HEADER, height=36)
+    hdr.pack(fill=tk.X)
+    hdr.pack_propagate(False)
+    tk.Label(hdr, text="  \u25c4  原文 (Original)", bg=C_HEADER, fg=C_FG, font=hdr_font).pack(side=tk.LEFT, padx=10)
+    tk.Label(hdr, text="繁化后 (Converted)  \u25ba  ", bg=C_HEADER, fg=C_FG, font=hdr_font).pack(side=tk.RIGHT, padx=10)
+
+    # === 统计栏 ===
+    stats = tk.Frame(root, bg=C_BG, height=22)
+    stats.pack(fill=tk.X)
+    stats.pack_propagate(False)
+    tk.Label(stats, text=f"  共 {total} 行 | {diff_count} 处差异 | 字体: {text_family} {mono.cget('size')}pt",
+             bg=C_BG, fg=C_FG_LINENO, font=ui_font).pack(side=tk.LEFT)
+
+    # === 内容区 ===
+    content = tk.Frame(root, bg=C_BG)
+    content.pack(fill=tk.BOTH, expand=True, padx=2)
+
+    # === 缩略图 (Minimap) ===
+    minimap = tk.Canvas(content, width=MINIMAP_W, bg=C_MINIMAP_BG, bd=0, highlightthickness=0)
+    minimap.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # === 左右面板 (PanedWindow 支持拖动分隔条) ===
+    panels = tk.PanedWindow(content, orient=tk.HORIZONTAL, bg=C_BG,
+                            sashwidth=4, sashrelief=tk.FLAT, bd=0)
+    panels.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    def make_panel():
+        f = tk.Frame(panels, bg=C_BG)
+        ln = tk.Text(f, width=5, bg=C_LINENO, fg=C_FG_LINENO, font=mono, bd=0, padx=8, pady=3, wrap=tk.NONE, cursor='arrow')
+        ln.pack(side=tk.LEFT, fill=tk.Y)
+        tf = tk.Frame(f, bg=C_BG)
+        tf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        hs = ttk.Scrollbar(tf, orient=tk.HORIZONTAL, style='Dark.Horizontal.TScrollbar')
+        hs.pack(side=tk.BOTTOM, fill=tk.X)
+        tx = tk.Text(tf, bg=C_BG, fg=C_FG, font=mono, bd=0, padx=8, pady=3, wrap=tk.NONE, xscrollcommand=hs.set, cursor='arrow')
+        tx.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        hs.config(command=tx.xview)
+        return f, ln, tx, hs
+
+    lf, lln, ltx, lhs = make_panel()
+    rf, rln, rtx, rhs = make_panel()
+    panels.add(lf, minsize=200, stretch='always')
+    panels.add(rf, minsize=200, stretch='always')
+
+    # 差异标签
+    ltx.tag_configure('dl', background=C_DIFF_L)
+    rtx.tag_configure('dr', background=C_DIFF_R)
+    ltx.tag_configure('cl', background=C_CHAR_L)
+    rtx.tag_configure('cr', background=C_CHAR_R)
+
+    # === 批量填充内容 (单次 insert + 批量 tag_add, 避免逐行 Python-Tk 往返) ===
+    lineno_text = "\n".join(str(i + 1) for i in range(total)) + ("\n" if total else "")
+    orig_all = "\n".join(original_texts) + ("\n" if original_texts else "")
+    conv_all = "\n".join(converted_texts) + ("\n" if converted_texts else "")
+    lln.insert("1.0", lineno_text)
+    rln.insert("1.0", lineno_text)
+    ltx.insert("1.0", orig_all)
+    rtx.insert("1.0", conv_all)
+
+    # 行级差异: 批量 tag_add (分块避免单次参数过多)
+    diff_indices = [i for i, (o, c) in enumerate(zip(original_texts, converted_texts)) if o != c]
+    _CHUNK = 1000
+    for _s in range(0, len(diff_indices), _CHUNK):
+        _chunk = diff_indices[_s:_s + _CHUNK]
+        _la, _ra = [], []
+        for _idx in _chunk:
+            _la.extend([f"{_idx + 1}.0", f"{_idx + 1}.end"])
+            _ra.extend([f"{_idx + 1}.0", f"{_idx + 1}.end"])
+        ltx.tag_add('dl', *_la)
+        rtx.tag_add('dr', *_ra)
+
+    # 字符级差异高亮 (仅对小文件, 大文件会严重卡顿)
+    if total <= 1000:
+        for _idx in diff_indices:
+            _orig, _conv = original_texts[_idx], converted_texts[_idx]
+            _sm = difflib.SequenceMatcher(None, _orig, _conv)
+            for _op, _i1, _i2, _j1, _j2 in _sm.get_opcodes():
+                if _op in ('delete', 'replace'):
+                    ltx.tag_add('cl', f"{_idx + 1}.0+{_i1}c", f"{_idx + 1}.0+{_i2}c")
+                if _op in ('insert', 'replace'):
+                    rtx.tag_add('cr', f"{_idx + 1}.0+{_j1}c", f"{_idx + 1}.0+{_j2}c")
+
+    for w in [ltx, rtx, lln, rln]:
+        w.config(state=tk.DISABLED)
+
+    # === 缩略图绘制 (PhotoImage 单张图片代替逐行 create_rectangle) ===
+    viewport_rect = [None]
+    minimap_img = [None]
+
+    # 预计算差异标记与前缀和, 实现 O(1) 区间查询
+    _is_diff = [(o != c) for o, c in zip(original_texts, converted_texts)]
+    while len(_is_diff) < total:
+        _is_diff.append(False)
+    _diff_prefix = [0]
+    for _d in _is_diff:
+        _diff_prefix.append(_diff_prefix[-1] + (1 if _d else 0))
+
+    # 预生成像素行字符串 (只有两种: 差异行 / 相同行)
+    half_w = MINIMAP_W // 2
+    right_w = MINIMAP_W - half_w
+    _row_diff = "{" + " ".join([C_CHAR_L] * half_w) + " " + " ".join([C_CHAR_R] * right_w) + "}"
+    _row_same = "{" + " ".join([C_MINIMAP_SAME] * MINIMAP_W) + "}"
+
+    def draw_minimap():
+        minimap.delete('all')
+        h = minimap.winfo_height()
+        if h <= 1:
+            return
+        img = tk.PhotoImage(width=MINIMAP_W, height=h)
+        # 单次 put 写入全部像素行 (空格分隔的多行数据)
+        rows = []
+        for py in range(h):
+            ls = int(py * total / h)
+            le = min(total, max(ls + 1, int((py + 1) * total / h)))
+            rows.append(_row_diff if _diff_prefix[le] - _diff_prefix[ls] > 0 else _row_same)
+        img.put(" ".join(rows), (0, 0))
+        minimap.create_image(0, 0, image=img, anchor=tk.NW)
+        minimap_img[0] = img  # 防止被 GC 回收
+        first, last = ltx.yview()
+        vp_top = first * h
+        vp_bottom = min(max(last * h, vp_top + 4), h)
+        viewport_rect[0] = minimap.create_rectangle(0, vp_top, MINIMAP_W, vp_bottom, outline=C_VIEWPORT, width=1)
+
+    def update_viewport(first, last):
+        if viewport_rect[0] is None:
+            return
+        h = minimap.winfo_height()
+        if h <= 1:
+            return
+        vp_top = first * h
+        vp_bottom = min(max(last * h, vp_top + 4), h)
+        minimap.coords(viewport_rect[0], 0, vp_top, MINIMAP_W, vp_bottom)
+
+    # === 同步滚动 (yscrollcommand 驱动，支持滚轮/中键/键盘等所有滚动方式) ===
+    _syncing = [False]
+
+    def on_yscroll(source, first, last):
+        first = float(first)
+        last = float(last)
+        update_viewport(first, last)
+        if _syncing[0]:
+            return
+        _syncing[0] = True
+        for w in [ltx, rtx, lln, rln]:
+            if w is not source:
+                w.yview_moveto(first)
+        _syncing[0] = False
+
+    for w in [ltx, rtx, lln, rln]:
+        w.config(yscrollcommand=lambda f, l, src=w: on_yscroll(src, f, l))
+
+    # 鼠标滚轮
+    def on_wheel(event):
+        delta = -1 if event.delta > 0 else 1
+        ltx.yview_scroll(delta, 'units')
+        return "break"
+
+    for w in [ltx, rtx, lln, rln, minimap]:
+        w.bind("<MouseWheel>", on_wheel)
+
+    # 鼠标中键拖拽滚动
+    _b2_y = [None]
+
+    def on_b2_press(event):
+        _b2_y[0] = event.y
+        return "break"
+
+    def on_b2_motion(event):
+        if _b2_y[0] is None:
+            _b2_y[0] = event.y
+            return "break"
+        dy = event.y - _b2_y[0]
+        _b2_y[0] = event.y
+        if abs(dy) >= 3:
+            ltx.yview_scroll(-(dy // 3), 'units')
+        return "break"
+
+    def on_b2_release(event):
+        _b2_y[0] = None
+        return "break"
+
+    for w in [ltx, rtx, lln, rln]:
+        w.bind("<Button-2>", on_b2_press)
+        w.bind("<B2-Motion>", on_b2_motion)
+        w.bind("<ButtonRelease-2>", on_b2_release)
+
+    # 键盘滚动
+    def on_key(event):
+        if event.keysym == 'Prior': ltx.yview_scroll(-10, 'units')
+        elif event.keysym == 'Next': ltx.yview_scroll(10, 'units')
+        elif event.keysym == 'Up': ltx.yview_scroll(-1, 'units')
+        elif event.keysym == 'Down': ltx.yview_scroll(1, 'units')
+        elif event.keysym == 'Home': ltx.yview_moveto(0.0)
+        elif event.keysym == 'End': ltx.yview_moveto(1.0)
+        return "break"
+
+    for w in [ltx, rtx, lln, rln]:
+        for key in ('<Prior>', '<Next>', '<Up>', '<Down>', '<Home>', '<End>'):
+            w.bind(key, on_key)
+    root.bind('<Prior>', on_key)
+    root.bind('<Next>', on_key)
+    root.bind('<Up>', on_key)
+    root.bind('<Down>', on_key)
+    root.bind('<Home>', on_key)
+    root.bind('<End>', on_key)
+
+    # 缩略图交互：点击/拖拽导航
+    def on_minimap_click(event):
+        h = minimap.winfo_height()
+        if h <= 1:
+            return
+        first, last = ltx.yview()
+        page = last - first
+        ratio = event.y / h
+        new_first = max(0.0, min(1.0 - page, ratio - page / 2))
+        ltx.yview_moveto(new_first)
+
+    minimap.bind('<Button-1>', on_minimap_click)
+    minimap.bind('<B1-Motion>', on_minimap_click)
+
+    # 水平同步 (带递归保护，防止垂直滚动时 xscrollcommand 级联触发)
+    _x_syncing = [False]
+
+    def on_lx(first, last):
+        if _x_syncing[0]:
+            return
+        _x_syncing[0] = True
+        rhs.set(first, last)
+        rtx.xview_moveto(first)
+        _x_syncing[0] = False
+
+    def on_rx(first, last):
+        if _x_syncing[0]:
+            return
+        _x_syncing[0] = True
+        lhs.set(first, last)
+        ltx.xview_moveto(first)
+        _x_syncing[0] = False
+
+    ltx.config(xscrollcommand=on_lx)
+    rtx.config(xscrollcommand=on_rx)
+    lhs.config(command=lambda *a: ltx.xview(*a))
+    rhs.config(command=lambda *a: rtx.xview(*a))
+
+    # 窗口大小变化时重绘缩略图
+    def on_configure(event):
+        if event.widget == minimap:
+            draw_minimap()
+
+    minimap.bind('<Configure>', on_configure)
+    root.after_idle(draw_minimap)
+
+    # === 底部栏 ===
+    bot = tk.Frame(root, bg=C_HEADER, height=40)
+    bot.pack(fill=tk.X)
+    bot.pack_propagate(False)
+    tk.Button(bot, text="关闭", bg=C_ACCENT, fg='white', font=ui_font, bd=0, padx=25, pady=5, command=root.destroy).pack(side=tk.RIGHT, padx=15, pady=5)
+
+    root.mainloop()
+
+# 独立差异比较窗口模式（子进程启动，不阻塞主转换流程）
+if len(sys.argv) >= 3 and sys.argv[1] == '--diff':
+    try:
+        diff_file = sys.argv[2]
+        with open(diff_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        show_diff_window(data['original'], data['converted'])
+        try: os.remove(diff_file)
+        except: pass
+    except Exception as e:
+        print(f"Diff viewer error: {e}")
+    sys.exit(0)
+
 try:
     if sys.platform == 'win32':
         os.system('chcp 65001 >nul')
@@ -564,15 +925,49 @@ try:
                 
                 for b in res: flat_results.extend(b)
             
-            output = []; 
+            output = [];
             for i, orig in enumerate(lines_data):
                 res_text = flat_results[i]
                 if AE_DATA_PATTERN.search(orig['text']):
-                    res_text = orig['text'] 
-                
+                    res_text = orig['text']
+
                 output.append({"id": orig['id'], "text": res_text})
-            
+
+            # 先写入输出文件（不阻塞）
             with open(args.output_file, 'w', encoding='utf-8') as f: json.dump(output, f, ensure_ascii=False, separators=(',', ':'))
+
+            # 繁化对比：非阻塞启动独立子进程窗口
+            if config.get('show_compare'):
+                try:
+                    import subprocess
+                    diff_file = args.output_file + '.diff.json'
+                    orig_ass = []
+                    conv_ass = []
+                    for i, item in enumerate(lines_data):
+                        meta = item.get('ass_meta')
+                        o_txt = item['text']
+                        c_txt = output[i]['text'] if i < len(output) else o_txt
+                        if meta:
+                            orig_ass.append(_format_ass_line(meta, o_txt))
+                            conv_ass.append(_format_ass_line(meta, c_txt))
+                        else:
+                            orig_ass.append(o_txt)
+                            conv_ass.append(c_txt)
+                    diff_data = {'original': orig_ass, 'converted': conv_ass}
+                    with open(diff_file, 'w', encoding='utf-8') as f:
+                        json.dump(diff_data, f, ensure_ascii=False)
+
+                    python_exe = sys.executable
+                    if sys.platform == 'win32' and python_exe.lower().endswith('python.exe'):
+                        candidate = python_exe[:-10] + 'pythonw.exe'
+                        if os.path.exists(candidate):
+                            python_exe = candidate
+
+                    script_path = os.path.abspath(__file__)
+                    subprocess.Popen([python_exe, script_path, '--diff', diff_file],
+                                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
+                except Exception as diff_e:
+                    print(f"差异比较窗口启动失败: {diff_e}")
             
         except Exception as inner_e:
             raise inner_e
