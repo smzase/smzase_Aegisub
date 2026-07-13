@@ -1,7 +1,7 @@
 script_name = "AI 简繁转换"
 script_description = "多模型 AI 转换 + 繁化姬"
-script_author = "Gemini 3 Pro Preview + Claude OPUS 4.6"
-script_version = "26w22a"
+script_author = "Gemini 3 Pro Preview"
+script_version = "26w29a"
 
 local tr = aegisub.gettext
 local json = require 'json' 
@@ -466,31 +466,44 @@ end
 local function deduplicate_lines(selected_lines, subtitles, skip_styles, use_smart_dedup, track_style)
     local unique_texts = {}
     local unique_styles = {}
-    local text_to_unique_idx = {} 
+    local unique_meta = {} -- ASS 元数据（用于繁化对比显示完整字幕行）
+    local text_to_unique_idx = {}
     local line_mapping = {}
     for i, idx in ipairs(selected_lines) do
         local line = subtitles[idx]
         -- 修改：增加 is_kara_template_line 检测，排除 Effect 为 code/template 的行
         if is_style_excluded(line.style, skip_styles) or is_kara_template_line(line.effect) or not is_valid_text_line(line.text) then
-            line_mapping[i] = -1 
+            line_mapping[i] = -1
         else
             local content_key = line.text
             if use_smart_dedup then
                 -- 智能去重：剥离标签，忽略坐标差异
                 content_key = smart_mask_for_clipboard(line.text)
             end
-            
+
             if content_key == "" then line_mapping[i] = -1
             else
                 local dedup_key = content_key
                 if track_style then
                     dedup_key = (line.style or "") .. "\0" .. content_key
                 end
-                if text_to_unique_idx[dedup_key] then 
+                if text_to_unique_idx[dedup_key] then
                     line_mapping[i] = text_to_unique_idx[dedup_key]
                 else
                     table.insert(unique_texts, content_key)
                     table.insert(unique_styles, line.style or "")
+                    table.insert(unique_meta, {
+                        class = line.class or "dialogue",
+                        layer = line.layer or 0,
+                        start_time = line.start_time or 0,
+                        end_time = line.end_time or 0,
+                        style = line.style or "",
+                        actor = line.actor or "",
+                        margin_l = line.margin_l or 0,
+                        margin_r = line.margin_r or 0,
+                        margin_v = line.margin_v or 0,
+                        effect = line.effect or ""
+                    })
                     local new_idx = #unique_texts
                     text_to_unique_idx[dedup_key] = new_idx
                     line_mapping[i] = new_idx
@@ -498,7 +511,7 @@ local function deduplicate_lines(selected_lines, subtitles, skip_styles, use_sma
             end
         end
     end
-    return unique_texts, line_mapping, unique_styles
+    return unique_texts, line_mapping, unique_styles, unique_meta
 end
 
 -- 应用翻译
@@ -840,7 +853,7 @@ function menu_zhconvert(subtitles, selected_lines)
     table.insert(dialog, {class="label", label="输入→保护字词→转换前取代→繁化姬转换→转换后取代→还原保护字词→输出", x=0, y=next_y+8, width=W_TOTAL, height=1})
     table.insert(dialog, {class="label", label="而差异比较是使用流程中两个红色箭头时的文字做比较", x=0, y=next_y+9, width=W_TOTAL, height=1})
     
-    local buttons = {"清除设定", "保存设定", "中国化", "香港化", "台湾化", "取消"}
+    local buttons = {"清除设定", "保存设定", "中国化", "香港化", "台湾化", "繁化对比", "取消"}
     local pressed, res = aegisub.dialog.display(dialog, buttons)
     if pressed == "取消" or not pressed then return end
     
@@ -856,12 +869,13 @@ function menu_zhconvert(subtitles, selected_lines)
         local converter = "Taiwan"
         if pressed == "中国化" then converter = "China" end
         if pressed == "香港化" then converter = "Hongkong" end
+        local show_compare = (pressed == "繁化对比")
         save_config(cfg)
         run_main_process(subtitles, selected_lines, {
             action = "translate", config = {
                 engine = "zhconvert", converter = converter, zhc_config = { modules = cfg.zhc_modules, userPre = cfg.zhc_userPre, userPost = cfg.zhc_userPost, userProtect = cfg.zhc_userProtect },
                 zhc_use_proxy = cfg.zhc_use_proxy, proxy_type = cfg.proxy_type, proxy_host = cfg.proxy_host, proxy_port = cfg.proxy_port, proxy_user = cfg.proxy_user, proxy_pass = cfg.proxy_pass,
-                protected_terms = "" 
+                protected_terms = "", show_compare = show_compare
             }, title = "繁化姬: " .. converter, done_prefix = pressed
         })
     end
@@ -927,13 +941,14 @@ function run_main_process(subtitles, selected_lines, options)
     
     -- 核心修复：AI 模式开启智能去重 (true)，繁化姬模式关闭 (false)
     -- 繁化姬模式按 style 区分 dedup key 并保留每条记录的 style
-    local unique_texts, line_mapping, unique_styles = deduplicate_lines(selected_lines, subtitles, cfg.skip_styles or "", not is_zhconvert, is_zhconvert)
+    local unique_texts, line_mapping, unique_styles, unique_meta = deduplicate_lines(selected_lines, subtitles, cfg.skip_styles or "", not is_zhconvert, is_zhconvert)
     if #unique_texts == 0 then aegisub.debug.out("没有可处理的文本。\n") return end
-    
+
     local lines_data = {}
-    for i, txt in ipairs(unique_texts) do 
+    for i, txt in ipairs(unique_texts) do
         local entry = {id=i, text=txt}
         if is_zhconvert then entry.style = unique_styles[i] or "" end
+        if cfg.show_compare then entry.ass_meta = unique_meta[i] end
         table.insert(lines_data, entry)
     end
     
@@ -950,7 +965,8 @@ function run_main_process(subtitles, selected_lines, options)
             protected_terms = cfg.protected_terms, temperature = cfg.temperature, top_p = cfg.top_p,
             -- 新增：将自定义 Prompt 传递给 Python (需要 Python 脚本支持)
             custom_prompt_s2t = main_cfg.prompts.api_s2t,
-            custom_prompt_t2s = main_cfg.prompts.api_t2s
+            custom_prompt_t2s = main_cfg.prompts.api_t2s,
+            show_compare = cfg.show_compare
         }, lines = lines_data
     }
     
@@ -975,8 +991,8 @@ function run_main_process(subtitles, selected_lines, options)
 end
 
 function validate_selection(subtitles, selected_lines) return #selected_lines > 0 end
-aegisub.register_macro(".AI 简繁转换/1. 繁化姬 (ZhConvert)", "繁化姬转换", menu_zhconvert, validate_selection)
-aegisub.register_macro(".AI 简繁转换/2. AI 转换窗口", "选择 AI 模型进行转换", menu_ai_translate, validate_selection)
-aegisub.register_macro(".AI 简繁转换/3. AI 配置管理", "管理 Key 和模型", menu_ai_config)
-aegisub.register_macro(".AI 简繁转换/4. 复制数据 (Web)", "复制纯文本到剪贴板", menu_copy_web_data, validate_selection)
-aegisub.register_macro(".AI 简繁转换/5. 导入数据 (Web)", "导入并智能合并标签", menu_import_web_data, validate_selection)
+aegisub.register_macro("AI 简繁转换/1. 繁化姬 (ZhConvert)", "繁化姬转换", menu_zhconvert, validate_selection)
+aegisub.register_macro("AI 简繁转换/2. AI 转换窗口", "选择 AI 模型进行转换", menu_ai_translate, validate_selection)
+aegisub.register_macro("AI 简繁转换/3. AI 配置管理", "管理 Key 和模型", menu_ai_config)
+aegisub.register_macro("AI 简繁转换/4. 复制数据 (Web)", "复制纯文本到剪贴板", menu_copy_web_data, validate_selection)
+aegisub.register_macro("AI 简繁转换/5. 导入数据 (Web)", "导入并智能合并标签", menu_import_web_data, validate_selection)
