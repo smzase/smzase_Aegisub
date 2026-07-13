@@ -991,8 +991,8 @@ function run_main_process(subtitles, selected_lines, options)
 end
 
 function validate_selection(subtitles, selected_lines) return #selected_lines > 0 end
-aegisub.register_macro("AI 简繁转换/1. 繁化姬 (ZhConvert)", "繁化姬转换", menu_zhconvert, validate_selection)
-aegisub.register_macro("AI 简繁转换/2. AI 转换窗口", "选择 AI 模型进行转换", menu_ai_translate, validate_selection)
-aegisub.register_macro("AI 简繁转换/3. AI 配置管理", "管理 Key 和模型", menu_ai_config)
-aegisub.register_macro("AI 简繁转换/4. 复制数据 (Web)", "复制纯文本到剪贴板", menu_copy_web_data, validate_selection)
-aegisub.register_macro("AI 简繁转换/5. 导入数据 (Web)", "导入并智能合并标签", menu_import_web_data, validate_selection)
+aegisub.register_macro(".AI 简繁转换/1. 繁化姬 (ZhConvert)", "繁化姬转换", menu_zhconvert, validate_selection)
+aegisub.register_macro(".AI 简繁转换/2. AI 转换窗口", "选择 AI 模型进行转换", menu_ai_translate, validate_selection)
+aegisub.register_macro(".AI 简繁转换/3. AI 配置管理", "管理 Key 和模型", menu_ai_config)
+aegisub.register_macro(".AI 简繁转换/4. 复制数据 (Web)", "复制纯文本到剪贴板", menu_copy_web_data, validate_selection)
+aegisub.register_macro(".AI 简繁转换/5. 导入数据 (Web)", "导入并智能合并标签", menu_import_web_data, validate_selection)
