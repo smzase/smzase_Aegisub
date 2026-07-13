@@ -45,337 +45,204 @@ def _format_ass_line(meta, text):
         text,
     )
 
-def show_diff_window(original_texts, converted_texts):
-    """VS Code 风格差异比较窗口：深色主题 + 缩略图 + 非阻塞"""
+def _open_vscode_diff(original_texts, converted_texts, output_file):
+    """调用 VS Code 的 diff 功能对比原文与转换后文本"""
     try:
-        import tkinter as tk
-        from tkinter import ttk, font as tkfont
-        import difflib
-    except ImportError:
-        print("tkinter 不可用")
-        return
+        import subprocess
+        import shutil
+        import webbrowser
+        import tempfile
 
-    # VS Code Dark Theme
-    C_BG = '#1e1e1e'
-    C_HEADER = '#2d2d2d'
-    C_LINENO = '#1a1a1a'
-    C_FG = '#d4d4d4'
-    C_FG_LINENO = '#858585'
-    C_DIFF_L = '#4a2d2d'
-    C_DIFF_R = '#2d4a2d'
-    C_CHAR_L = '#804040'
-    C_CHAR_R = '#3c7050'
-    C_ACCENT = '#0e639c'
-    C_MINIMAP_BG = '#1a1a1a'
-    C_MINIMAP_SAME = '#2a2a2a'
-    C_VIEWPORT = '#4a9eff'
-    MINIMAP_W = 80
+        # 使用系统临时目录存放 (VS Code --diff 只接受文件路径, 无法纯内存)
+        orig_fd, orig_file = tempfile.mkstemp(suffix='.orig.ass')
+        conv_fd, conv_file = tempfile.mkstemp(suffix='.conv.ass')
+        os.write(orig_fd, '\n'.join(original_texts).encode('utf-8'))
+        os.write(conv_fd, '\n'.join(converted_texts).encode('utf-8'))
+        os.close(orig_fd)
+        os.close(conv_fd)
 
-    root = tk.Tk()
-    root.title("繁化对比 - Diff Viewer")
-    root.geometry("1500x850")
-    root.minsize(800, 400)
-    root.configure(bg=C_BG)
-    root.lift()
-    root.attributes('-topmost', True)
-    root.after(100, lambda: root.attributes('-topmost', False))
+        # 查找本地 VS Code 可执行文件
+        code_cmd = shutil.which('code')
+        if not code_cmd and sys.platform == 'win32':
+            for candidate in [
+                os.path.expandvars(r'%LOCALAPPDATA%\Programs\Microsoft VS Code\bin\code.cmd'),
+                os.path.expandvars(r'%ProgramFiles%\Microsoft VS Code\bin\code.cmd'),
+                os.path.expandvars(r'%ProgramFiles(x86)%\Microsoft VS Code\bin\code.cmd'),
+            ]:
+                if os.path.exists(candidate):
+                    code_cmd = candidate
+                    break
 
-    # 深色滚动条样式 (clam 主题支持自定义颜色)
-    _style = ttk.Style()
-    _style.theme_use('clam')
-    _style.configure('Dark.Horizontal.TScrollbar',
-                     background=C_BG, troughcolor=C_BG,
-                     arrowcolor=C_FG, bordercolor=C_BG,
-                     lightcolor=C_BG, darkcolor=C_BG,
-                     gripcount=0)
-
-    # 字体：系统默认字体（微软雅黑，避免等宽字体回退到宋体）
-    available = set(tkfont.families())
-    text_family = 'Microsoft YaHei UI'
-    for f in ['Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', 'Tahoma']:
-        if f in available:
-            text_family = f
-            break
-    mono = tkfont.Font(family=text_family, size=11)
-    ui_font = tkfont.Font(family='Segoe UI', size=10)
-    hdr_font = tkfont.Font(family='Segoe UI', size=11, weight='bold')
-
-    total = max(len(original_texts), len(converted_texts))
-    diff_count = sum(1 for o, c in zip(original_texts, converted_texts) if o != c)
-
-    # === 顶部标题栏 ===
-    hdr = tk.Frame(root, bg=C_HEADER, height=36)
-    hdr.pack(fill=tk.X)
-    hdr.pack_propagate(False)
-    tk.Label(hdr, text="  \u25c4  原文 (Original)", bg=C_HEADER, fg=C_FG, font=hdr_font).pack(side=tk.LEFT, padx=10)
-    tk.Label(hdr, text="繁化后 (Converted)  \u25ba  ", bg=C_HEADER, fg=C_FG, font=hdr_font).pack(side=tk.RIGHT, padx=10)
-
-    # === 统计栏 ===
-    stats = tk.Frame(root, bg=C_BG, height=22)
-    stats.pack(fill=tk.X)
-    stats.pack_propagate(False)
-    tk.Label(stats, text=f"  共 {total} 行 | {diff_count} 处差异 | 字体: {text_family} {mono.cget('size')}pt",
-             bg=C_BG, fg=C_FG_LINENO, font=ui_font).pack(side=tk.LEFT)
-
-    # === 内容区 ===
-    content = tk.Frame(root, bg=C_BG)
-    content.pack(fill=tk.BOTH, expand=True, padx=2)
-
-    # === 缩略图 (Minimap) ===
-    minimap = tk.Canvas(content, width=MINIMAP_W, bg=C_MINIMAP_BG, bd=0, highlightthickness=0)
-    minimap.pack(side=tk.RIGHT, fill=tk.Y)
-
-    # === 左右面板 (PanedWindow 支持拖动分隔条) ===
-    panels = tk.PanedWindow(content, orient=tk.HORIZONTAL, bg=C_BG,
-                            sashwidth=4, sashrelief=tk.FLAT, bd=0)
-    panels.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-    def make_panel():
-        f = tk.Frame(panels, bg=C_BG)
-        ln = tk.Text(f, width=5, bg=C_LINENO, fg=C_FG_LINENO, font=mono, bd=0, padx=8, pady=3, wrap=tk.NONE, cursor='arrow')
-        ln.pack(side=tk.LEFT, fill=tk.Y)
-        tf = tk.Frame(f, bg=C_BG)
-        tf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        hs = ttk.Scrollbar(tf, orient=tk.HORIZONTAL, style='Dark.Horizontal.TScrollbar')
-        hs.pack(side=tk.BOTTOM, fill=tk.X)
-        tx = tk.Text(tf, bg=C_BG, fg=C_FG, font=mono, bd=0, padx=8, pady=3, wrap=tk.NONE, xscrollcommand=hs.set, cursor='arrow')
-        tx.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        hs.config(command=tx.xview)
-        return f, ln, tx, hs
-
-    lf, lln, ltx, lhs = make_panel()
-    rf, rln, rtx, rhs = make_panel()
-    panels.add(lf, minsize=200, stretch='always')
-    panels.add(rf, minsize=200, stretch='always')
-
-    # 差异标签
-    ltx.tag_configure('dl', background=C_DIFF_L)
-    rtx.tag_configure('dr', background=C_DIFF_R)
-    ltx.tag_configure('cl', background=C_CHAR_L)
-    rtx.tag_configure('cr', background=C_CHAR_R)
-
-    # === 批量填充内容 (单次 insert + 批量 tag_add, 避免逐行 Python-Tk 往返) ===
-    lineno_text = "\n".join(str(i + 1) for i in range(total)) + ("\n" if total else "")
-    orig_all = "\n".join(original_texts) + ("\n" if original_texts else "")
-    conv_all = "\n".join(converted_texts) + ("\n" if converted_texts else "")
-    lln.insert("1.0", lineno_text)
-    rln.insert("1.0", lineno_text)
-    ltx.insert("1.0", orig_all)
-    rtx.insert("1.0", conv_all)
-
-    # 行级差异: 批量 tag_add (分块避免单次参数过多)
-    diff_indices = [i for i, (o, c) in enumerate(zip(original_texts, converted_texts)) if o != c]
-    _CHUNK = 1000
-    for _s in range(0, len(diff_indices), _CHUNK):
-        _chunk = diff_indices[_s:_s + _CHUNK]
-        _la, _ra = [], []
-        for _idx in _chunk:
-            _la.extend([f"{_idx + 1}.0", f"{_idx + 1}.end"])
-            _ra.extend([f"{_idx + 1}.0", f"{_idx + 1}.end"])
-        ltx.tag_add('dl', *_la)
-        rtx.tag_add('dr', *_ra)
-
-    # 字符级差异高亮 (仅对小文件, 大文件会严重卡顿)
-    if total <= 1000:
-        for _idx in diff_indices:
-            _orig, _conv = original_texts[_idx], converted_texts[_idx]
-            _sm = difflib.SequenceMatcher(None, _orig, _conv)
-            for _op, _i1, _i2, _j1, _j2 in _sm.get_opcodes():
-                if _op in ('delete', 'replace'):
-                    ltx.tag_add('cl', f"{_idx + 1}.0+{_i1}c", f"{_idx + 1}.0+{_i2}c")
-                if _op in ('insert', 'replace'):
-                    rtx.tag_add('cr', f"{_idx + 1}.0+{_j1}c", f"{_idx + 1}.0+{_j2}c")
-
-    for w in [ltx, rtx, lln, rln]:
-        w.config(state=tk.DISABLED)
-
-    # === 缩略图绘制 (PhotoImage 单张图片代替逐行 create_rectangle) ===
-    viewport_rect = [None]
-    minimap_img = [None]
-
-    # 预计算差异标记与前缀和, 实现 O(1) 区间查询
-    _is_diff = [(o != c) for o, c in zip(original_texts, converted_texts)]
-    while len(_is_diff) < total:
-        _is_diff.append(False)
-    _diff_prefix = [0]
-    for _d in _is_diff:
-        _diff_prefix.append(_diff_prefix[-1] + (1 if _d else 0))
-
-    # 预生成像素行字符串 (只有两种: 差异行 / 相同行)
-    half_w = MINIMAP_W // 2
-    right_w = MINIMAP_W - half_w
-    _row_diff = "{" + " ".join([C_CHAR_L] * half_w) + " " + " ".join([C_CHAR_R] * right_w) + "}"
-    _row_same = "{" + " ".join([C_MINIMAP_SAME] * MINIMAP_W) + "}"
-
-    def draw_minimap():
-        minimap.delete('all')
-        h = minimap.winfo_height()
-        if h <= 1:
+        if not code_cmd:
+            webbrowser.open('https://vscode.dev/')
+            print("[繁化对比] 未检测到本地 VS Code，已打开 vscode.dev")
+            print(f"  原文文件: {orig_file}")
+            print(f"  转换文件: {conv_file}")
             return
-        img = tk.PhotoImage(width=MINIMAP_W, height=h)
-        # 单次 put 写入全部像素行 (空格分隔的多行数据)
-        rows = []
-        for py in range(h):
-            ls = int(py * total / h)
-            le = min(total, max(ls + 1, int((py + 1) * total / h)))
-            rows.append(_row_diff if _diff_prefix[le] - _diff_prefix[ls] > 0 else _row_same)
-        img.put(" ".join(rows), (0, 0))
-        minimap.create_image(0, 0, image=img, anchor=tk.NW)
-        minimap_img[0] = img  # 防止被 GC 回收
-        first, last = ltx.yview()
-        vp_top = first * h
-        vp_bottom = min(max(last * h, vp_top + 4), h)
-        viewport_rect[0] = minimap.create_rectangle(0, vp_top, MINIMAP_W, vp_bottom, outline=C_VIEWPORT, width=1)
 
-    def update_viewport(first, last):
-        if viewport_rect[0] is None:
-            return
-        h = minimap.winfo_height()
-        if h <= 1:
-            return
-        vp_top = first * h
-        vp_bottom = min(max(last * h, vp_top + 4), h)
-        minimap.coords(viewport_rect[0], 0, vp_top, MINIMAP_W, vp_bottom)
+        # Windows: 启动前记录已有 VS Code 窗口 & 查找 Aegisub 所在显示器
+        existing_vscode = set()
+        aegisub_rect = None
+        if sys.platform == 'win32':
+            aegisub_rect, existing_vscode = _find_aegisub_monitor_and_vscode_windows()
 
-    # === 同步滚动 (yscrollcommand 驱动，支持滚轮/中键/键盘等所有滚动方式) ===
-    _syncing = [False]
+        # 启动 VS Code 新窗口
+        subprocess.Popen([code_cmd, '-n', '--diff', orig_file, conv_file],
+                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
 
-    def on_yscroll(source, first, last):
-        first = float(first)
-        last = float(last)
-        update_viewport(first, last)
-        if _syncing[0]:
-            return
-        _syncing[0] = True
-        for w in [ltx, rtx, lln, rln]:
-            if w is not source:
-                w.yview_moveto(first)
-        _syncing[0] = False
+        # Windows: 等待新窗口出现并移动到 Aegisub 所在显示器
+        if sys.platform == 'win32' and aegisub_rect:
+            _move_new_vscode_to_monitor(existing_vscode, aegisub_rect)
 
-    for w in [ltx, rtx, lln, rln]:
-        w.config(yscrollcommand=lambda f, l, src=w: on_yscroll(src, f, l))
-
-    # 鼠标滚轮
-    def on_wheel(event):
-        delta = -1 if event.delta > 0 else 1
-        ltx.yview_scroll(delta, 'units')
-        return "break"
-
-    for w in [ltx, rtx, lln, rln, minimap]:
-        w.bind("<MouseWheel>", on_wheel)
-
-    # 鼠标中键拖拽滚动
-    _b2_y = [None]
-
-    def on_b2_press(event):
-        _b2_y[0] = event.y
-        return "break"
-
-    def on_b2_motion(event):
-        if _b2_y[0] is None:
-            _b2_y[0] = event.y
-            return "break"
-        dy = event.y - _b2_y[0]
-        _b2_y[0] = event.y
-        if abs(dy) >= 3:
-            ltx.yview_scroll(-(dy // 3), 'units')
-        return "break"
-
-    def on_b2_release(event):
-        _b2_y[0] = None
-        return "break"
-
-    for w in [ltx, rtx, lln, rln]:
-        w.bind("<Button-2>", on_b2_press)
-        w.bind("<B2-Motion>", on_b2_motion)
-        w.bind("<ButtonRelease-2>", on_b2_release)
-
-    # 键盘滚动
-    def on_key(event):
-        if event.keysym == 'Prior': ltx.yview_scroll(-10, 'units')
-        elif event.keysym == 'Next': ltx.yview_scroll(10, 'units')
-        elif event.keysym == 'Up': ltx.yview_scroll(-1, 'units')
-        elif event.keysym == 'Down': ltx.yview_scroll(1, 'units')
-        elif event.keysym == 'Home': ltx.yview_moveto(0.0)
-        elif event.keysym == 'End': ltx.yview_moveto(1.0)
-        return "break"
-
-    for w in [ltx, rtx, lln, rln]:
-        for key in ('<Prior>', '<Next>', '<Up>', '<Down>', '<Home>', '<End>'):
-            w.bind(key, on_key)
-    root.bind('<Prior>', on_key)
-    root.bind('<Next>', on_key)
-    root.bind('<Up>', on_key)
-    root.bind('<Down>', on_key)
-    root.bind('<Home>', on_key)
-    root.bind('<End>', on_key)
-
-    # 缩略图交互：点击/拖拽导航
-    def on_minimap_click(event):
-        h = minimap.winfo_height()
-        if h <= 1:
-            return
-        first, last = ltx.yview()
-        page = last - first
-        ratio = event.y / h
-        new_first = max(0.0, min(1.0 - page, ratio - page / 2))
-        ltx.yview_moveto(new_first)
-
-    minimap.bind('<Button-1>', on_minimap_click)
-    minimap.bind('<B1-Motion>', on_minimap_click)
-
-    # 水平同步 (带递归保护，防止垂直滚动时 xscrollcommand 级联触发)
-    _x_syncing = [False]
-
-    def on_lx(first, last):
-        if _x_syncing[0]:
-            return
-        _x_syncing[0] = True
-        rhs.set(first, last)
-        rtx.xview_moveto(first)
-        _x_syncing[0] = False
-
-    def on_rx(first, last):
-        if _x_syncing[0]:
-            return
-        _x_syncing[0] = True
-        lhs.set(first, last)
-        ltx.xview_moveto(first)
-        _x_syncing[0] = False
-
-    ltx.config(xscrollcommand=on_lx)
-    rtx.config(xscrollcommand=on_rx)
-    lhs.config(command=lambda *a: ltx.xview(*a))
-    rhs.config(command=lambda *a: rtx.xview(*a))
-
-    # 窗口大小变化时重绘缩略图
-    def on_configure(event):
-        if event.widget == minimap:
-            draw_minimap()
-
-    minimap.bind('<Configure>', on_configure)
-    root.after_idle(draw_minimap)
-
-    # === 底部栏 ===
-    bot = tk.Frame(root, bg=C_HEADER, height=40)
-    bot.pack(fill=tk.X)
-    bot.pack_propagate(False)
-    tk.Button(bot, text="关闭", bg=C_ACCENT, fg='white', font=ui_font, bd=0, padx=25, pady=5, command=root.destroy).pack(side=tk.RIGHT, padx=15, pady=5)
-
-    root.mainloop()
-
-# 独立差异比较窗口模式（子进程启动，不阻塞主转换流程）
-if len(sys.argv) >= 3 and sys.argv[1] == '--diff':
-    try:
-        diff_file = sys.argv[2]
-        with open(diff_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        show_diff_window(data['original'], data['converted'])
-        try: os.remove(diff_file)
-        except: pass
+        # 启动独立清理进程, 60 秒后自动删除临时文件 (VS Code 读取内容后即不再需要)
+        _schedule_temp_cleanup([orig_file, conv_file])
     except Exception as e:
-        print(f"Diff viewer error: {e}")
-    sys.exit(0)
+        print(f"VS Code diff 启动失败: {e}")
+
+
+def _schedule_temp_cleanup(files, delay=60):
+    """启动独立进程, 延迟删除临时文件"""
+    try:
+        import subprocess
+        paths_repr = ', '.join(repr(f) for f in files)
+        script = f"import time,os;time.sleep({delay});[os.remove(f) for f in [{paths_repr}] if os.path.exists(f)]"
+        flags = 0
+        if sys.platform == 'win32':
+            flags = 0x08000000 | 0x00000008  # CREATE_NO_WINDOW | DETACHED_PROCESS
+        subprocess.Popen([sys.executable, '-c', script],
+                         creationflags=flags,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _find_aegisub_monitor_and_vscode_windows():
+    """查找 Aegisub 窗口所在显示器工作区 & 记录已有 VS Code 窗口句柄"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+
+        # 设置函数签名确保 64 位兼容
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.MonitorFromWindow.restype = wintypes.HANDLE
+        user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+
+        aegisub_rect = [None]
+        vscode_hwnds = set()
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _enum_cb(hwnd, lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value
+            # 查找 Aegisub 窗口所在显示器
+            if aegisub_rect[0] is None and 'Aegisub' in title:
+                class MONITORINFO(ctypes.Structure):
+                    _fields_ = [('cbSize', wintypes.DWORD),
+                                ('rcMonitor', wintypes.RECT),
+                                ('rcWork', wintypes.RECT),
+                                ('dwFlags', wintypes.DWORD)]
+                monitor = user32.MonitorFromWindow(hwnd, 0x00000002)  # MONITOR_DEFAULTTONEAREST
+                mi = MONITORINFO()
+                mi.cbSize = ctypes.sizeof(mi)
+                user32.GetMonitorInfoW(monitor, ctypes.byref(mi))
+                aegisub_rect[0] = (mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom)
+            # 记录已有 VS Code 窗口
+            if 'Visual Studio Code' in title:
+                vscode_hwnds.add(hwnd)
+            return True
+
+        user32.EnumWindows(_enum_cb, 0)
+        if aegisub_rect[0] is None:
+            print("[繁化对比] 未找到 Aegisub 窗口，无法定位显示器")
+        return aegisub_rect[0], vscode_hwnds
+    except Exception as e:
+        print(f"[繁化对比] 查找窗口异常: {e}")
+        return None, set()
+
+
+def _move_new_vscode_to_monitor(existing_hwnds, monitor_rect):
+    """等待新的 VS Code 窗口出现，移动到指定显示器并置顶"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        import time
+        user32 = ctypes.windll.user32
+
+        # 设置函数签名, 确保 64 位系统上 HWND 正确传递
+        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.IsIconic.restype = wintypes.BOOL
+
+        found = [None]
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _find_new(hwnd, lparam):
+            if found[0] is not None:
+                return False
+            if hwnd in existing_hwnds or not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            if 'Visual Studio Code' in buf.value:
+                found[0] = hwnd
+                return False
+            return True
+
+        # 最多等 10 秒 (VS Code 冷启动可能较慢)
+        for _ in range(100):
+            time.sleep(0.1)
+            user32.EnumWindows(_find_new, 0)
+            if found[0] is not None:
+                break
+
+        hwnd = found[0]
+        if hwnd is None:
+            print("[繁化对比] 未找到 VS Code 新窗口，跳过窗口移动")
+            return
+
+        # 如果窗口最小化了，先恢复
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+
+        # 移动到目标显示器居中
+        left, top, right, bottom = monitor_rect
+        w, h = 1200, 800
+        cx = left + max(0, (right - left - w) // 2)
+        cy = top + max(0, (bottom - top - h) // 2)
+
+        # HWND_TOPMOST / HWND_NOTOPMOST 必须用 c_void_p 传递, 不能直接用整数 -1/-2
+        # 否则 64 位系统上会被截断为 32 位, 导致 SetWindowPos 静默失败
+        HWND_TOPMOST = ctypes.c_void_p(-1)
+        HWND_NOTOPMOST = ctypes.c_void_p(-2)
+        SWP_SHOWWINDOW = 0x0040
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+
+        # 先置顶 + 移动位置
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, cx, cy, w, h, SWP_SHOWWINDOW)
+        # 再取消永久置顶 (保持在前台但不挡其他窗口)
+        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW)
+        # 尝试设为前台窗口
+        user32.SetForegroundWindow(hwnd)
+    except Exception as e:
+        print(f"[繁化对比] 窗口移动异常: {e}")
+
 
 try:
     if sys.platform == 'win32':
@@ -936,11 +803,9 @@ try:
             # 先写入输出文件（不阻塞）
             with open(args.output_file, 'w', encoding='utf-8') as f: json.dump(output, f, ensure_ascii=False, separators=(',', ':'))
 
-            # 繁化对比：非阻塞启动独立子进程窗口
+            # 繁化对比：调用 VS Code 的 diff 功能
             if config.get('show_compare'):
                 try:
-                    import subprocess
-                    diff_file = args.output_file + '.diff.json'
                     orig_ass = []
                     conv_ass = []
                     for i, item in enumerate(lines_data):
@@ -953,21 +818,9 @@ try:
                         else:
                             orig_ass.append(o_txt)
                             conv_ass.append(c_txt)
-                    diff_data = {'original': orig_ass, 'converted': conv_ass}
-                    with open(diff_file, 'w', encoding='utf-8') as f:
-                        json.dump(diff_data, f, ensure_ascii=False)
-
-                    python_exe = sys.executable
-                    if sys.platform == 'win32' and python_exe.lower().endswith('python.exe'):
-                        candidate = python_exe[:-10] + 'pythonw.exe'
-                        if os.path.exists(candidate):
-                            python_exe = candidate
-
-                    script_path = os.path.abspath(__file__)
-                    subprocess.Popen([python_exe, script_path, '--diff', diff_file],
-                                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
+                    _open_vscode_diff(orig_ass, conv_ass, args.output_file)
                 except Exception as diff_e:
-                    print(f"差异比较窗口启动失败: {diff_e}")
+                    print(f"差异比较启动失败: {diff_e}")
             
         except Exception as inner_e:
             raise inner_e
