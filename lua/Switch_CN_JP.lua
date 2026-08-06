@@ -1,11 +1,9 @@
 script_name = "多语种字幕工具箱"
-script_description = "包含中日切换与多语种同选功能"
+script_description = "包含中日切换、多语种同选与时间轴对齐功能"
 script_author = "Assistant"
-script_version = "5.0"
+script_version = "5.1"
 
----------------------------------------------------------
--- 功能一：切换中日字幕 (Switch_CN_JP)
----------------------------------------------------------
+
 local function find_counterpart(subtitles, line_idx)
     local current_line = subtitles[line_idx]
     if not current_line or current_line.class ~= "dialogue" then return nil end
@@ -13,7 +11,12 @@ local function find_counterpart(subtitles, line_idx)
     local style = current_line.style or ""
     local target_style = nil
 
-    if string.find(style, "CN") then target_style = string.gsub(style, "CN", "JP")
+    if style == "Text CN Top" then
+        target_style = "Text JP Top"
+    elseif style == "Text JP Top" then
+        target_style = "Text CN Top"
+        
+    elseif string.find(style, "CN") then target_style = string.gsub(style, "CN", "JP")
     elseif string.find(style, "JP") then target_style = string.gsub(style, "JP", "CN")
     elseif string.find(style, "中") then target_style = string.gsub(style, "中", "日")
     elseif string.find(style, "日") then target_style = string.gsub(style, "日", "中")
@@ -85,9 +88,6 @@ function toggle_cn_jp(subtitles, selected_lines, active_line)
 end
 
 
----------------------------------------------------------
--- 功能二：选中所有同时间轴语言 (Select_All_Languages)
----------------------------------------------------------
 function select_all_languages(subtitles, selected_lines, active_line)
     if #selected_lines == 0 then return selected_lines, active_line end
 
@@ -115,9 +115,41 @@ function select_all_languages(subtitles, selected_lines, active_line)
     return new_selected, active_line
 end
 
--- 【关键修改】：使用 "主菜单名/子功能名" 的格式来实现二级菜单折叠
+
+-- 新功能：将上一行（同样式）的结尾时间轴对齐到当前选定行的开头时间轴
+function snap_prev_end_to_current(subtitles, selected_lines, active_line)
+    if #selected_lines == 0 then return selected_lines, active_line end
+
+    for _, sel_idx in ipairs(selected_lines) do
+        local current_line = subtitles[sel_idx]
+        if current_line.class == "dialogue" then
+            local current_style = current_line.style
+            
+            -- 向上回溯，寻找最近的一个相同样式的对话行
+            for prev_idx = sel_idx - 1, 1, -1 do
+                local prev_line = subtitles[prev_idx]
+                if prev_line.class == "dialogue" then
+                    -- 匹配相同样式，这样可以兼容中日双语交错排布的情况
+                    if prev_line.style == current_style then
+                        prev_line.end_time = current_line.start_time
+                        subtitles[prev_idx] = prev_line
+                        break -- 仅修改距离最近的那一行即可，然后跳出循环
+                    end
+                end
+            end
+        end
+    end
+    
+    aegisub.set_undo_point("上一行结尾对齐当前行开头")
+    return selected_lines, active_line
+end
+
+
 aegisub.register_macro("：批选行/Switch_CN_JP", "一键切换中日字幕 (画面跟随跳转)", toggle_cn_jp)
 aegisub.register_macro("：批选行/Select_All_Languages", "一键选中所有同时间轴的多语种行 (留在原地)", select_all_languages)
+-- 注册新功能的宏
+aegisub.register_macro("：批选行/Snap_Prev_End_To_Current", "使上一行的结尾对齐当前行的开头", snap_prev_end_to_current)
 
 -- automation/lua/Switch_CN_JP/：批选行/Select_All_Languages
 -- automation/lua/Switch_CN_JP/：批选行/Switch_CN_JP
+-- automation/lua/Switch_CN_JP/：批选行/Snap_Prev_End_To_Current
